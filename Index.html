@@ -1,0 +1,1124 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17211b;
+        --muted: #617067;
+        --line: #dce5df;
+        --surface: #ffffff;
+        --surface-soft: #f5f8f6;
+        --accent: #17643c;
+        --accent-dark: #0d4a2a;
+        --level-0: #f2f7f3;
+        --level-1: #d9eddc;
+        --level-2: #a9d5ad;
+        --level-3: #287444;
+        --danger: #9f2f2f;
+        --danger-bg: #fff0f0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        background: #eef3ef;
+        color: var(--ink);
+      }
+
+      body.modal-open { overflow: hidden; }
+
+      button,
+      a { font: inherit; }
+
+      button { color: inherit; }
+
+      [hidden] { display: none !important; }
+
+      .app {
+        width: min(100%, 920px);
+        min-height: 100vh;
+        margin: 0 auto;
+        padding: 16px 12px 32px;
+      }
+
+      .panel {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--surface);
+        box-shadow: 0 12px 32px rgb(36 69 48 / 9%);
+      }
+
+      .app-header {
+        padding: 20px 18px 16px;
+        background: linear-gradient(135deg, #f8fbf8 0%, #e6f2e9 100%);
+      }
+
+      .title-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+
+      h1 {
+        margin: 0;
+        color: var(--accent-dark);
+        font-size: clamp(1.3rem, 5vw, 2rem);
+        letter-spacing: .02em;
+      }
+
+      .employee-badge {
+        padding: 3px 8px;
+        border: 1px solid rgb(23 100 60 / 24%);
+        border-radius: 999px;
+        background: rgb(255 255 255 / 72%);
+        color: var(--accent-dark);
+        font-size: .72rem;
+        font-weight: 800;
+      }
+
+      .subtitle {
+        margin: 6px 0 14px;
+        color: var(--muted);
+        font-size: .88rem;
+      }
+
+      .source-link {
+        display: inline-flex;
+        min-height: 42px;
+        align-items: center;
+        padding: 9px 13px;
+        border-radius: 10px;
+        background: var(--accent);
+        color: #fff;
+        font-size: .83rem;
+        font-weight: 800;
+        text-decoration: none;
+      }
+
+      .source-link:hover { background: var(--accent-dark); }
+
+      .source-link:focus-visible,
+      .nav-button:focus-visible,
+      .today-button:focus-visible,
+      .day.interactive:focus-visible,
+      .modal-close:focus-visible {
+        outline: 3px solid rgb(23 100 60 / 28%);
+        outline-offset: 2px;
+      }
+
+      .toolbar {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 8px;
+        align-items: center;
+        padding: 14px 12px 10px;
+      }
+
+      .month-title {
+        margin: 0;
+        text-align: center;
+        font-size: 1.2rem;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .nav-button,
+      .today-button {
+        min-height: 42px;
+        border: 1px solid #b9c9be;
+        border-radius: 10px;
+        background: #fff;
+        color: var(--accent-dark);
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      .nav-button {
+        width: 44px;
+        font-size: 1.25rem;
+      }
+
+      .nav-button:hover,
+      .today-button:hover { background: #eef7f0; }
+
+      .secondary-toolbar {
+        display: flex;
+        min-height: 42px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 0 12px 12px;
+      }
+
+      .today-button { padding: 8px 16px; }
+
+      .status {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 7px;
+        color: var(--muted);
+        font-size: .78rem;
+        text-align: right;
+      }
+
+      .spinner,
+      .detail-spinner {
+        border: 2px solid #bfd0c3;
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin .8s linear infinite;
+      }
+
+      .spinner {
+        width: 15px;
+        height: 15px;
+      }
+
+      .detail-spinner {
+        width: 24px;
+        height: 24px;
+      }
+
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .error {
+        margin: 0 12px 12px;
+        padding: 10px 12px;
+        border: 1px solid #efc1c1;
+        border-radius: 10px;
+        background: var(--danger-bg);
+        color: var(--danger);
+        font-size: .86rem;
+        white-space: pre-line;
+      }
+
+      .calendar-wrap { padding: 0 8px 10px; }
+
+      .weekdays,
+      .calendar-grid {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+      }
+
+      .weekdays {
+        border: 1px solid var(--line);
+        border-bottom: 0;
+        border-radius: 10px 10px 0 0;
+        background: var(--surface-soft);
+      }
+
+      .weekday {
+        padding: 8px 2px;
+        color: var(--muted);
+        font-size: .74rem;
+        font-weight: 700;
+        text-align: center;
+      }
+
+      .weekday.saturday { color: #30689b; }
+      .weekday.sunday { color: #a34646; }
+
+      .calendar-grid {
+        overflow: hidden;
+        border-top: 1px solid var(--line);
+        border-left: 1px solid var(--line);
+        border-radius: 0 0 10px 10px;
+      }
+
+      .day {
+        position: relative;
+        min-width: 0;
+        min-height: 76px;
+        padding: 7px 4px 6px;
+        border: 0;
+        border-right: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        background: var(--day-bg, #fff);
+        text-align: left;
+      }
+
+      .day.interactive { cursor: pointer; }
+
+      .day.interactive:hover {
+        box-shadow: inset 0 0 0 2px rgb(13 74 42 / 30%);
+      }
+
+      .day.level-0 { --day-bg: var(--level-0); }
+      .day.level-1 { --day-bg: var(--level-1); }
+      .day.level-2 { --day-bg: var(--level-2); }
+      .day.level-3 { --day-bg: var(--level-3); color: #fff; }
+
+      .day.outside:not(.interactive) {
+        --day-bg: #fafbfa;
+        color: #9aa49d;
+      }
+
+      .day.outside.interactive { opacity: .72; }
+
+      .day.weekend:not(.level-3)::after {
+        position: absolute;
+        inset: 0;
+        border-top: 3px solid rgb(74 108 133 / 18%);
+        content: "";
+        pointer-events: none;
+      }
+
+      .day.today {
+        z-index: 1;
+        outline: 3px solid #e09b22;
+        outline-offset: -3px;
+      }
+
+      .date-number {
+        display: block;
+        font-size: .78rem;
+        font-weight: 800;
+        line-height: 1;
+      }
+
+      .congestion-symbol {
+        display: block;
+        margin-top: 8px;
+        overflow: hidden;
+        font-size: clamp(1.35rem, 6vw, 1.85rem);
+        font-weight: 900;
+        line-height: 1;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .no-data {
+        color: #98a39b;
+        font-weight: 500;
+      }
+
+      .legend-section {
+        padding: 14px 14px 18px;
+        border-top: 1px solid var(--line);
+      }
+
+      .legend-title {
+        margin: 0 0 9px;
+        font-size: .86rem;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px 12px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+        font-size: .74rem;
+      }
+
+      .legend-color {
+        display: grid;
+        width: 26px;
+        height: 26px;
+        place-items: center;
+        border: 1px solid rgb(23 33 27 / 12%);
+        border-radius: 5px;
+        background: var(--legend-color);
+        color: var(--legend-ink, var(--ink));
+        font-size: .875rem;
+        font-weight: 900;
+        line-height: 1;
+      }
+
+      .hover-preview {
+        position: fixed;
+        z-index: 20;
+        width: min(320px, calc(100vw - 24px));
+        padding: 10px 12px;
+        border: 1px solid #bfd0c3;
+        border-radius: 10px;
+        background: rgb(255 255 255 / 98%);
+        box-shadow: 0 10px 28px rgb(23 33 27 / 20%);
+        color: var(--ink);
+        font-size: .76rem;
+        line-height: 1.45;
+        pointer-events: none;
+      }
+
+      .preview-title {
+        margin: 0 0 5px;
+        color: var(--accent-dark);
+        font-size: .8rem;
+        font-weight: 800;
+      }
+
+      .preview-list {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .preview-list li + li { margin-top: 3px; }
+
+      .modal-backdrop {
+        position: fixed;
+        z-index: 50;
+        inset: 0;
+        display: grid;
+        place-items: end center;
+        padding: 12px;
+        background: rgb(12 25 17 / 55%);
+      }
+
+      .modal {
+        width: calc(100vw - 24px);
+        max-width: 620px;
+        max-height: min(82vh, 720px);
+        min-width: 0;
+        overflow: hidden;
+        border-radius: 18px 18px 12px 12px;
+        background: #fff;
+        box-shadow: 0 24px 64px rgb(8 22 13 / 35%);
+      }
+
+      .modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 16px 16px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .modal-title {
+        margin: 0;
+        color: var(--accent-dark);
+        font-size: 1.08rem;
+      }
+
+      .modal-close {
+        width: 42px;
+        height: 42px;
+        flex: 0 0 auto;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: #fff;
+        cursor: pointer;
+        font-size: 1.4rem;
+        line-height: 1;
+      }
+
+      .modal-close:hover { background: var(--surface-soft); }
+
+      .modal-body {
+        max-height: calc(min(82vh, 720px) - 71px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 14px 16px 20px;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      .detail-loading {
+        display: flex;
+        min-height: 140px;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        color: var(--muted);
+      }
+
+      .detail-list {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .detail-card {
+        padding: 12px 13px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface-soft);
+      }
+
+      .detail-subject {
+        margin: 0;
+        font-size: .94rem;
+        font-weight: 800;
+        overflow-wrap: anywhere;
+      }
+
+      .detail-work {
+        margin: 5px 0 0;
+        color: var(--accent-dark);
+        font-size: .86rem;
+        font-weight: 700;
+        overflow-wrap: anywhere;
+      }
+
+      .detail-empty,
+      .detail-error {
+        margin: 18px 0;
+        text-align: center;
+      }
+
+      .detail-empty { color: var(--muted); }
+      .detail-error { color: var(--danger); }
+
+      @media (min-width: 640px) {
+        .app { padding: 28px 20px 48px; }
+        .app-header { padding: 26px 28px 20px; }
+        .toolbar { padding: 18px 22px 10px; }
+        .secondary-toolbar { padding: 0 22px 16px; }
+        .calendar-wrap { padding: 0 18px 18px; }
+        .day { min-height: 104px; padding: 10px 8px; }
+        .date-number { font-size: .9rem; }
+        .congestion-symbol { margin-top: 14px; font-size: 2.05rem; }
+        .legend-section { padding: 18px 24px 22px; }
+        .modal-backdrop { place-items: center; padding: 24px; }
+        .modal { border-radius: 18px; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .spinner,
+        .detail-spinner { animation-duration: 1.8s; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel" aria-labelledby="app-title">
+        <header class="app-header">
+          <div class="title-row">
+            <h1 id="app-title">混雑見込みカレンダー</h1>
+            <span class="employee-badge">社員用</span>
+          </div>
+          <p class="subtitle">日付を選ぶと、その日の案件・作業状況を確認できます</p>
+          <a
+            id="source-link"
+            class="source-link"
+            target="_blank"
+            rel="noopener noreferrer"
+            hidden
+          >元のダンプロスケジュールを開く ↗</a>
+        </header>
+
+        <div class="toolbar">
+          <button class="nav-button" id="previous-month" type="button" aria-label="前月を表示">‹</button>
+          <h2 class="month-title" id="month-title"></h2>
+          <button class="nav-button" id="next-month" type="button" aria-label="次月を表示">›</button>
+        </div>
+
+        <div class="secondary-toolbar">
+          <button class="today-button" id="today" type="button">今日</button>
+          <div class="status" id="status" role="status" aria-live="polite">
+            <span class="spinner" id="spinner" aria-hidden="true"></span>
+            <span id="status-text">読み込み中…</span>
+          </div>
+        </div>
+
+        <div class="error" id="error" role="alert" hidden></div>
+
+        <div class="calendar-wrap" id="calendar-wrap" aria-busy="true">
+          <div class="weekdays" aria-hidden="true">
+            <div class="weekday sunday">日</div>
+            <div class="weekday">月</div>
+            <div class="weekday">火</div>
+            <div class="weekday">水</div>
+            <div class="weekday">木</div>
+            <div class="weekday">金</div>
+            <div class="weekday saturday">土</div>
+          </div>
+          <div class="calendar-grid" id="calendar-grid" aria-label="月間カレンダー"></div>
+        </div>
+
+        <section class="legend-section" aria-labelledby="legend-title">
+          <h3 class="legend-title" id="legend-title">混雑度</h3>
+          <ul class="legend" id="legend"></ul>
+        </section>
+      </section>
+    </main>
+
+    <aside class="hover-preview" id="hover-preview" aria-hidden="true" hidden></aside>
+
+    <div class="modal-backdrop" id="detail-backdrop" hidden>
+      <section
+        class="modal"
+        id="detail-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="detail-title"
+      >
+        <header class="modal-header">
+          <h2 class="modal-title" id="detail-title"></h2>
+          <button class="modal-close" id="detail-close" type="button" aria-label="詳細を閉じる">×</button>
+        </header>
+        <div class="modal-body" id="detail-body"></div>
+      </section>
+    </div>
+
+    <script>
+      (() => {
+        'use strict';
+
+        const TIME_ZONE = 'Asia/Tokyo';
+        const REFRESH_INTERVAL_MS = 60 * 1000;
+        const HOVER_DELAY_MS = 250;
+        const ERROR_CODES = Object.freeze({
+          accessDenied: 'ACCESS_DENIED',
+          dataFetchFailed: 'DATA_FETCH_FAILED',
+        });
+        const FALLBACK_LEVELS = [
+          { level: 0, symbol: '◎', label: '余裕あり' },
+          { level: 1, symbol: '○', label: '対応可能' },
+          { level: 2, symbol: '△', label: 'やや混雑' },
+          { level: 3, symbol: '×', label: '混雑' },
+        ];
+        const LEVEL_COLORS = ['#f2f7f3', '#d9eddc', '#a9d5ad', '#287444'];
+        const LEVEL_SYMBOLS = ['◎', '○', '△', '×'];
+        const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
+        const hoverCapable = window.matchMedia('(hover: hover) and (pointer: fine)');
+
+        const elements = {
+          calendarWrap: document.getElementById('calendar-wrap'),
+          grid: document.getElementById('calendar-grid'),
+          monthTitle: document.getElementById('month-title'),
+          statusText: document.getElementById('status-text'),
+          spinner: document.getElementById('spinner'),
+          error: document.getElementById('error'),
+          legend: document.getElementById('legend'),
+          previousMonth: document.getElementById('previous-month'),
+          nextMonth: document.getElementById('next-month'),
+          today: document.getElementById('today'),
+          sourceLink: document.getElementById('source-link'),
+          hoverPreview: document.getElementById('hover-preview'),
+          detailBackdrop: document.getElementById('detail-backdrop'),
+          detailModal: document.getElementById('detail-modal'),
+          detailTitle: document.getElementById('detail-title'),
+          detailBody: document.getElementById('detail-body'),
+          detailClose: document.getElementById('detail-close'),
+        };
+
+        let tokyoToday = getDatePartsInTimeZone(new Date(), TIME_ZONE);
+        let viewYear = tokyoToday.year;
+        let viewMonth = tokyoToday.month;
+        let calendarData = new Map();
+        let hasLoadedSuccessfully = false;
+        let isLoading = false;
+        let detailGeneration = 0;
+        let modalRequestToken = 0;
+        let hoverRequestToken = 0;
+        let hoverTimer = 0;
+        let lastFocusedElement = null;
+        const detailCache = new Map();
+        const detailPending = new Map();
+
+        function pad2(value) {
+          return String(value).padStart(2, '0');
+        }
+
+        function toDateKey(year, month, day) {
+          return `${year}-${pad2(month)}-${pad2(day)}`;
+        }
+
+        function getDatePartsInTimeZone(date, timeZone) {
+          const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone,
+            year: 'numeric',
+            month: 'numeric',
+            day: 'numeric',
+          }).formatToParts(date);
+          const values = {};
+          parts.forEach((part) => {
+            if (part.type !== 'literal') values[part.type] = Number(part.value);
+          });
+          return { year: values.year, month: values.month, day: values.day };
+        }
+
+        function formatDateHeading(dateKey) {
+          const [year, month, day] = dateKey.split('-').map(Number);
+          const weekday = WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+          return `${month}月${day}日（${weekday}）`;
+        }
+
+        function renderCalendar() {
+          tokyoToday = getDatePartsInTimeZone(new Date(), TIME_ZONE);
+          elements.monthTitle.textContent = `${viewYear}年 ${viewMonth}月`;
+          elements.grid.replaceChildren();
+
+          const firstDay = new Date(viewYear, viewMonth - 1, 1);
+          const firstDayOffset = firstDay.getDay();
+          const daysInMonth = new Date(viewYear, viewMonth, 0).getDate();
+          const cellCount = Math.ceil((firstDayOffset + daysInMonth) / 7) * 7;
+
+          for (let index = 0; index < cellCount; index += 1) {
+            const day = index - firstDayOffset + 1;
+            if (day < 1 || day > daysInMonth) {
+              const emptyCell = document.createElement('div');
+              emptyCell.className = 'day outside';
+              emptyCell.setAttribute('aria-hidden', 'true');
+              elements.grid.appendChild(emptyCell);
+              continue;
+            }
+
+            const date = new Date(viewYear, viewMonth - 1, day);
+            const year = date.getFullYear();
+            const month = date.getMonth() + 1;
+            const key = toDateKey(year, month, day);
+            const item = calendarData.get(key);
+            const weekday = date.getDay();
+            const isWeekend = weekday === 0 || weekday === 6;
+            const count = item ? Number(item['count']) : 0;
+            const isWorkingDay = Boolean(item) && (!isWeekend || count >= 1);
+
+            const cell = document.createElement(isWorkingDay ? 'button' : 'div');
+            cell.className = 'day';
+            if (isWorkingDay) {
+              cell.type = 'button';
+              cell.classList.add('interactive');
+              cell.dataset.date = key;
+              cell.addEventListener('click', () => openDetails(key, cell));
+              if (hoverCapable.matches) {
+                cell.addEventListener('pointerenter', () => scheduleHover(key, cell));
+                cell.addEventListener('pointerleave', cancelHover);
+              }
+            }
+            if (isWeekend) cell.classList.add('weekend');
+            if (key === toDateKey(tokyoToday.year, tokyoToday.month, tokyoToday.day)) {
+              cell.classList.add('today');
+              cell.setAttribute('aria-current', 'date');
+            }
+            if (isWorkingDay) cell.classList.add(`level-${item.level}`);
+
+            const number = document.createElement('span');
+            number.className = 'date-number';
+            number.textContent = day;
+
+            if (isWorkingDay || !isWeekend) {
+              const symbol = document.createElement('span');
+              symbol.className = 'congestion-symbol';
+              if (item) {
+                symbol.textContent = item.symbol || LEVEL_SYMBOLS[item.level];
+                cell.setAttribute(
+                  'aria-label',
+                  `${year}年${month}月${day}日、${symbol.textContent} ${FALLBACK_LEVELS[item.level].label}。詳細を表示`,
+                );
+              } else {
+                symbol.textContent = '—';
+                symbol.classList.add('no-data');
+                cell.setAttribute('aria-label', `${year}年${month}月${day}日、データなし`);
+              }
+              cell.append(number, symbol);
+            } else {
+              cell.setAttribute('aria-label', `${year}年${month}月${day}日、休業日`);
+              cell.appendChild(number);
+            }
+            elements.grid.appendChild(cell);
+          }
+        }
+
+        function renderLegend(levels) {
+          elements.legend.replaceChildren();
+          levels.forEach((item) => {
+            const entry = document.createElement('li');
+            entry.className = 'legend-item';
+            const color = document.createElement('span');
+            color.className = 'legend-color';
+            color.style.setProperty('--legend-color', LEVEL_COLORS[item.level]);
+            if (item.level === 3) color.style.setProperty('--legend-ink', '#fff');
+            color.textContent = item.symbol || LEVEL_SYMBOLS[item.level];
+            const label = document.createElement('span');
+            label.textContent = item.label;
+            entry.append(color, label);
+            elements.legend.appendChild(entry);
+          });
+        }
+
+        function setLoading(loading) {
+          isLoading = loading;
+          elements.calendarWrap.setAttribute('aria-busy', String(loading));
+          elements.spinner.hidden = !loading;
+          if (loading) {
+            elements.statusText.textContent = hasLoadedSuccessfully ? '更新中…' : '読み込み中…';
+          }
+        }
+
+        function formatUpdatedAt(value) {
+          const date = new Date(value);
+          if (Number.isNaN(date.getTime())) return '更新日時不明';
+          return `最終更新 ${new Intl.DateTimeFormat('ja-JP', {
+            timeZone: TIME_ZONE,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          }).format(date)}`;
+        }
+
+        function chooseInitialMonth(days) {
+          if (hasLoadedSuccessfully || days.length === 0) return;
+          const currentPrefix = `${tokyoToday.year}-${pad2(tokyoToday.month)}-`;
+          if (days.some((day) => day.date.startsWith(currentPrefix))) return;
+
+          const todayUtc = Date.UTC(tokyoToday.year, tokyoToday.month - 1, tokyoToday.day);
+          const nearest = days.reduce((best, item) => {
+            const distance = Math.abs(Date.parse(`${item.date}T00:00:00Z`) - todayUtc);
+            return !best || distance < best.distance ? { item, distance } : best;
+          }, null);
+          if (nearest) {
+            const [year, month] = nearest.item.date.split('-').map(Number);
+            viewYear = year;
+            viewMonth = month;
+          }
+        }
+
+        function invalidateDetailCache() {
+          detailGeneration += 1;
+          detailCache.clear();
+          detailPending.clear();
+          cancelHover();
+        }
+
+        function getSafeErrorCode(response) {
+          return response
+            && response.error
+            && response.error.code === ERROR_CODES.accessDenied
+            ? ERROR_CODES.accessDenied
+            : ERROR_CODES.dataFetchFailed;
+        }
+
+        function hideSourceLink() {
+          elements.sourceLink.hidden = true;
+          elements.sourceLink.removeAttribute('href');
+        }
+
+        function showSourceLink(value) {
+          try {
+            const url = new URL(String(value || ''));
+            if (
+              url.protocol !== 'https:'
+              || url.hostname !== 'docs.google.com'
+              || !url.pathname.startsWith('/spreadsheets/d/')
+            ) {
+              hideSourceLink();
+              return;
+            }
+            elements.sourceLink.href = url.href;
+            elements.sourceLink.hidden = false;
+          } catch (error) {
+            hideSourceLink();
+          }
+        }
+
+        function handleCalendarResponse(response) {
+          if (!response || response.ok !== true || !response.data) {
+            handleCalendarError(getSafeErrorCode(response));
+            return;
+          }
+
+          const data = response.data;
+          const days = Array.isArray(data.days) ? data.days : [];
+          chooseInitialMonth(days);
+          calendarData = new Map(days.map((day) => [day.date, day]));
+          hasLoadedSuccessfully = true;
+          showSourceLink(data.spreadsheetUrl);
+          elements.error.hidden = true;
+          elements.error.textContent = '';
+          elements.statusText.textContent = formatUpdatedAt(data.updatedAt);
+          renderLegend(Array.isArray(data.levels) ? data.levels : FALLBACK_LEVELS);
+          renderCalendar();
+          setLoading(false);
+        }
+
+        function handleCalendarError(code) {
+          const accessDenied = code === ERROR_CODES.accessDenied;
+          if (accessDenied) hideSourceLink();
+          elements.error.textContent = accessDenied
+            ? 'このページを表示する権限がありません。\nダンプロスケジュールへのアクセス権限を確認してください。'
+            : 'データを取得できませんでした。しばらくしてから再度お試しください。';
+          elements.error.hidden = false;
+          elements.statusText.textContent = accessDenied
+            ? 'アクセス権限がありません'
+            : hasLoadedSuccessfully
+              ? '前回取得したデータを表示中'
+              : 'データを取得できませんでした';
+          setLoading(false);
+        }
+
+        function handleCalendarFailure() {
+          handleCalendarError(ERROR_CODES.dataFetchFailed);
+        }
+
+        function refreshCalendar() {
+          if (isLoading) return;
+          invalidateDetailCache();
+          setLoading(true);
+          google.script.run
+            .withSuccessHandler(handleCalendarResponse)
+            .withFailureHandler(handleCalendarFailure)
+            .getCalendarData();
+        }
+
+        function loadDayDetails(dateKey) {
+          if (detailCache.has(dateKey)) return Promise.resolve(detailCache.get(dateKey));
+          if (detailPending.has(dateKey)) return detailPending.get(dateKey);
+
+          const generation = detailGeneration;
+          let request;
+          request = new Promise((resolve, reject) => {
+            google.script.run
+              .withSuccessHandler((response) => {
+                if (!response || response.ok !== true || !response.data) {
+                  reject({ code: getSafeErrorCode(response) });
+                  return;
+                }
+                const data = response.data;
+                const result = {
+                  date: data.date === dateKey ? data.date : dateKey,
+                  items: Array.isArray(data.items) ? data.items : [],
+                };
+                if (generation === detailGeneration) detailCache.set(dateKey, result);
+                resolve(result);
+              })
+              .withFailureHandler(() => reject({ code: ERROR_CODES.dataFetchFailed }))
+              .getDayDetails(dateKey);
+          }).finally(() => {
+            if (detailPending.get(dateKey) === request) detailPending.delete(dateKey);
+          });
+          detailPending.set(dateKey, request);
+          return request;
+        }
+
+        function renderDetailItems(items) {
+          elements.detailBody.replaceChildren();
+          if (items.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'detail-empty';
+            empty.textContent = 'この日の予定はありません。';
+            elements.detailBody.appendChild(empty);
+            return;
+          }
+
+          const list = document.createElement('ul');
+          list.className = 'detail-list';
+          items.forEach((item) => {
+            const card = document.createElement('li');
+            card.className = 'detail-card';
+            const subject = document.createElement('p');
+            subject.className = 'detail-subject';
+            const customer = String(item.customer || '').trim();
+            const content = String(item.content || '').trim();
+            subject.textContent = customer && content
+              ? `${customer} / ${content}`
+              : customer || content || '案件情報なし';
+
+            const work = document.createElement('p');
+            work.className = 'detail-work';
+            const workText = String(item.work || '').trim() || '作業内容未設定';
+            const period = String(item.period || '').trim();
+            work.textContent = period ? `${workText}（${period}）` : workText;
+            card.append(subject, work);
+            list.appendChild(card);
+          });
+          elements.detailBody.appendChild(list);
+        }
+
+        function showDetailLoading() {
+          elements.detailBody.replaceChildren();
+          const loading = document.createElement('div');
+          loading.className = 'detail-loading';
+          loading.setAttribute('role', 'status');
+          const spinner = document.createElement('span');
+          spinner.className = 'detail-spinner';
+          spinner.setAttribute('aria-hidden', 'true');
+          const text = document.createElement('span');
+          text.textContent = '詳細を読み込み中…';
+          loading.append(spinner, text);
+          elements.detailBody.appendChild(loading);
+        }
+
+        function showDetailError(code) {
+          elements.detailBody.replaceChildren();
+          const error = document.createElement('p');
+          error.className = 'detail-error';
+          error.setAttribute('role', 'alert');
+          error.textContent = code === ERROR_CODES.accessDenied
+            ? '詳細情報を表示する権限がありません。'
+            : '詳細情報を取得できませんでした。しばらくしてから再度お試しください。';
+          elements.detailBody.appendChild(error);
+        }
+
+        async function openDetails(dateKey, trigger) {
+          cancelHover();
+          lastFocusedElement = trigger;
+          const requestToken = ++modalRequestToken;
+          elements.detailTitle.textContent = formatDateHeading(dateKey);
+          elements.detailBackdrop.hidden = false;
+          document.body.classList.add('modal-open');
+          showDetailLoading();
+          elements.detailClose.focus();
+
+          try {
+            const result = await loadDayDetails(dateKey);
+            if (requestToken !== modalRequestToken || elements.detailBackdrop.hidden) return;
+            renderDetailItems(result.items);
+          } catch (error) {
+            if (requestToken !== modalRequestToken || elements.detailBackdrop.hidden) return;
+            showDetailError(error && error.code);
+          }
+        }
+
+        function closeDetails() {
+          if (elements.detailBackdrop.hidden) return;
+          modalRequestToken += 1;
+          elements.detailBackdrop.hidden = true;
+          document.body.classList.remove('modal-open');
+          if (lastFocusedElement && document.contains(lastFocusedElement)) lastFocusedElement.focus();
+        }
+
+        function previewLine(item) {
+          const customer = String(item.customer || '').trim();
+          const content = String(item.content || '').trim();
+          const subject = customer || content || '案件';
+          const work = String(item.work || '').trim() || '作業内容未設定';
+          const period = String(item.period || '').trim();
+          return `${subject}：${period ? `${work}（${period}）` : work}`;
+        }
+
+        function positionPreview(anchor) {
+          const rect = anchor.getBoundingClientRect();
+          const preview = elements.hoverPreview;
+          const gap = 8;
+          const width = preview.offsetWidth;
+          const height = preview.offsetHeight;
+          let left = rect.left + (rect.width - width) / 2;
+          left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+          let top = rect.bottom + gap;
+          if (top + height > window.innerHeight - 8) top = rect.top - height - gap;
+          preview.style.left = `${Math.max(8, left)}px`;
+          preview.style.top = `${Math.max(8, top)}px`;
+        }
+
+        function showPreviewMessage(anchor, dateKey, message) {
+          elements.hoverPreview.replaceChildren();
+          const title = document.createElement('p');
+          title.className = 'preview-title';
+          title.textContent = formatDateHeading(dateKey);
+          const body = document.createElement('div');
+          body.textContent = message;
+          elements.hoverPreview.append(title, body);
+          elements.hoverPreview.hidden = false;
+          positionPreview(anchor);
+        }
+
+        function renderPreview(anchor, dateKey, items) {
+          elements.hoverPreview.replaceChildren();
+          const title = document.createElement('p');
+          title.className = 'preview-title';
+          title.textContent = formatDateHeading(dateKey);
+          elements.hoverPreview.appendChild(title);
+
+          if (items.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = '予定はありません。';
+            elements.hoverPreview.appendChild(empty);
+          } else {
+            const list = document.createElement('ul');
+            list.className = 'preview-list';
+            items.slice(0, 5).forEach((item) => {
+              const line = document.createElement('li');
+              line.textContent = previewLine(item);
+              list.appendChild(line);
+            });
+            if (items.length > 5) {
+              const more = document.createElement('li');
+              more.textContent = `ほか${items.length - 5}件`;
+              list.appendChild(more);
+            }
+            elements.hoverPreview.appendChild(list);
+          }
+          elements.hoverPreview.hidden = false;
+          positionPreview(anchor);
+        }
+
+        function scheduleHover(dateKey, anchor) {
+          if (!hoverCapable.matches) return;
+          window.clearTimeout(hoverTimer);
+          const requestToken = ++hoverRequestToken;
+          hoverTimer = window.setTimeout(async () => {
+            showPreviewMessage(anchor, dateKey, '読み込み中…');
+            try {
+              const result = await loadDayDetails(dateKey);
+              if (requestToken !== hoverRequestToken) return;
+              renderPreview(anchor, dateKey, result.items);
+            } catch (error) {
+              if (requestToken !== hoverRequestToken) return;
+              showPreviewMessage(
+                anchor,
+                dateKey,
+                error && error.code === ERROR_CODES.accessDenied
+                  ? '概要を表示する権限がありません。'
+                  : '概要を取得できませんでした。',
+              );
+            }
+          }, HOVER_DELAY_MS);
+        }
+
+        function cancelHover() {
+          window.clearTimeout(hoverTimer);
+          hoverRequestToken += 1;
+          elements.hoverPreview.hidden = true;
+        }
+
+        function moveMonth(offset) {
+          const next = new Date(viewYear, viewMonth - 1 + offset, 1);
+          viewYear = next.getFullYear();
+          viewMonth = next.getMonth() + 1;
+          cancelHover();
+          renderCalendar();
+        }
+
+        elements.previousMonth.addEventListener('click', () => moveMonth(-1));
+        elements.nextMonth.addEventListener('click', () => moveMonth(1));
+        elements.today.addEventListener('click', () => {
+          viewYear = tokyoToday.year;
+          viewMonth = tokyoToday.month;
+          cancelHover();
+          renderCalendar();
+        });
+        elements.detailClose.addEventListener('click', closeDetails);
+        elements.detailBackdrop.addEventListener('click', (event) => {
+          if (event.target === elements.detailBackdrop) closeDetails();
+        });
+        document.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape') closeDetails();
+        });
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') refreshCalendar();
+        });
+        window.addEventListener('resize', cancelHover);
+        window.addEventListener('scroll', cancelHover, { passive: true });
+
+        renderLegend(FALLBACK_LEVELS);
+        renderCalendar();
+        refreshCalendar();
+        window.setInterval(refreshCalendar, REFRESH_INTERVAL_MS);
+      })();
+    </script>
+  </body>
+</html>

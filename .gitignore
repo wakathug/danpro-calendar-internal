@@ -1,0 +1,7 @@
+﻿.clasp.json
+reference/
+node_modules/
+tools/ui-*.png
+.DS_Store
+Thumbs.db
+.env
