@@ -57,12 +57,18 @@ function getCalendarData() {
 /**
  * @return {{days: Array<{date: string, count: number, level: number, symbol: string}>,
  *   levels: Array<{level: number, symbol: string, label: string}>, updatedAt: string,
- *   timeZone: string, spreadsheetUrl: string}}
+ *   detailRevision: string, timeZone: string, spreadsheetUrl: string}}
  */
 function getCalendarData_() {
   const layout = resolveCurrentScheduleSheet_();
   const snapshot = readScheduleSnapshot_(layout);
-  cacheDayDetailsSnapshot_(layout.sheetId, snapshot.detailsByDate, snapshot.updatedAt);
+  const detailRevision = buildDetailRevision_(layout.sheetId, snapshot);
+  cacheDayDetailsSnapshot_(
+    layout.sheetId,
+    snapshot.detailsByDate,
+    snapshot.updatedAt,
+    detailRevision,
+  );
 
   const days = Object.keys(snapshot.countsByDate)
     .sort()
@@ -89,6 +95,7 @@ function getCalendarData_() {
       label: rule.label,
     })),
     updatedAt: snapshot.updatedAt,
+    detailRevision,
     timeZone: CALENDAR_CONFIG.timeZone,
     spreadsheetUrl: buildSpreadsheetUrl_(layout.sheetId),
   };
@@ -99,11 +106,12 @@ function getCalendarData_() {
  * 返す項目は客先名、内容、当日の作業内容、AM/PMに限定します。
  *
  * @param {string} dateKey yyyy-MM-dd形式の日付
+ * @param {string=} expectedRevision ブラウザーが表示中のカレンダーrevision
  * @return {{ok: boolean, data: Object}|{ok: false, error: {code: string}}}
  */
-function getDayDetails(dateKey) {
+function getDayDetails(dateKey, expectedRevision) {
   try {
-    return { ok: true, data: getDayDetails_(dateKey) };
+    return { ok: true, data: getDayDetails_(dateKey, expectedRevision) };
   } catch (error) {
     return createSafeErrorResponse_(error);
   }
@@ -111,26 +119,34 @@ function getDayDetails(dateKey) {
 
 /**
  * @param {string} dateKey yyyy-MM-dd形式の日付
+ * @param {string=} expectedRevision ブラウザーが表示中のカレンダーrevision
  * @return {{date: string,
  *   items: Array<{customer: string, content: string, work: string, period: string}>,
- *   updatedAt: string}}
+ *   updatedAt: string, revision: string}}
  */
-function getDayDetails_(dateKey) {
+function getDayDetails_(dateKey, expectedRevision) {
   const normalizedDateKey = normalizeDateKey_(dateKey);
   if (!normalizedDateKey) {
     throw new Error('日付はyyyy-MM-dd形式で指定してください。');
   }
 
-  const cached = getCachedDayDetails_(normalizedDateKey);
+  const cached = getCachedDayDetails_(normalizedDateKey, expectedRevision);
   if (cached) return cached;
 
   const layout = resolveCurrentScheduleSheet_();
   const snapshot = readScheduleSnapshot_(layout);
-  cacheDayDetailsSnapshot_(layout.sheetId, snapshot.detailsByDate, snapshot.updatedAt);
+  const detailRevision = buildDetailRevision_(layout.sheetId, snapshot);
+  cacheDayDetailsSnapshot_(
+    layout.sheetId,
+    snapshot.detailsByDate,
+    snapshot.updatedAt,
+    detailRevision,
+  );
   return {
     date: normalizedDateKey,
     items: snapshot.detailsByDate[normalizedDateKey] || [],
     updatedAt: snapshot.updatedAt,
+    revision: detailRevision,
   };
 }
 
@@ -362,13 +378,18 @@ function resolveMergedDisplayColumn_(dataValues, startRow, startColumn, column, 
  * 日付別詳細を現在ユーザー専用キャッシュへ保存し、最後に現行世代を切り替えます。
  * 世代にsheetIdを含めるため、左端タブ切替後の更新で旧タブの詳細は参照されません。
  */
-function cacheDayDetailsSnapshot_(sheetId, detailsByDate, updatedAt) {
+function cacheDayDetailsSnapshot_(sheetId, detailsByDate, updatedAt, revision) {
   try {
     const cache = CacheService.getUserCache();
-    const generation = `${sheetId}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
+    const generation = `${sheetId}:${revision}`;
     const cacheValues = {};
     Object.keys(detailsByDate).forEach((date) => {
-      const serialized = JSON.stringify({ date, items: detailsByDate[date], updatedAt });
+      const serialized = JSON.stringify({
+        date,
+        items: detailsByDate[date],
+        updatedAt,
+        revision,
+      });
       if (serialized.length <= CALENDAR_CONFIG.detailCacheMaxValueChars) {
         cacheValues[buildDayDetailsCacheKey_(generation, date)] = serialized;
       }
@@ -378,7 +399,7 @@ function cacheDayDetailsSnapshot_(sheetId, detailsByDate, updatedAt) {
     }
     cache.put(
       CALENDAR_CONFIG.detailCacheActiveKey,
-      JSON.stringify({ generation, sheetId: String(sheetId) }),
+      JSON.stringify({ generation, sheetId: String(sheetId), revision }),
       CALENDAR_CONFIG.detailCacheTtlSeconds,
     );
   } catch (error) {
@@ -386,22 +407,57 @@ function cacheDayDetailsSnapshot_(sheetId, detailsByDate, updatedAt) {
   }
 }
 
-/** @return {?{date: string, items: Array<Object>, updatedAt: string}} */
-function getCachedDayDetails_(dateKey) {
+/** @return {?{date: string, items: Array<Object>, updatedAt: string, revision: string}} */
+function getCachedDayDetails_(dateKey, expectedRevision) {
   try {
     const cache = CacheService.getUserCache();
     const activeText = cache.get(CALENDAR_CONFIG.detailCacheActiveKey);
     if (!activeText) return null;
     const active = JSON.parse(activeText);
-    if (!active || typeof active.generation !== 'string') return null;
+    if (
+      !active
+      || typeof active.generation !== 'string'
+      || typeof active.revision !== 'string'
+    ) return null;
+    if (
+      typeof expectedRevision === 'string'
+      && expectedRevision
+      && active.revision !== expectedRevision
+    ) return null;
     const cachedText = cache.get(buildDayDetailsCacheKey_(active.generation, dateKey));
     if (!cachedText) return null;
     const cached = JSON.parse(cachedText);
-    if (!cached || cached.date !== dateKey || !Array.isArray(cached.items)) return null;
+    if (
+      !cached
+      || cached.date !== dateKey
+      || !Array.isArray(cached.items)
+      || cached.revision !== active.revision
+    ) return null;
     return cached;
   } catch (error) {
     return null;
   }
+}
+
+/**
+ * カレンダー更新時刻ではなく、詳細表示に影響する実データから安定したrevisionを作ります。
+ * Spreadsheetの内容が同じなら60秒更新後も同じ値になり、変更時だけ切り替わります。
+ *
+ * @return {string}
+ */
+function buildDetailRevision_(sheetId, snapshot) {
+  const source = JSON.stringify({
+    schema: 1,
+    sheetId: String(sheetId),
+    countsByDate: snapshot.countsByDate,
+    detailsByDate: snapshot.detailsByDate,
+  });
+  const digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    source,
+    Utilities.Charset.UTF_8,
+  );
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, '');
 }
 
 /** @return {string} */

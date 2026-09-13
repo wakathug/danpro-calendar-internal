@@ -3,6 +3,7 @@
 process.env.TZ = 'Asia/Tokyo';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -231,7 +232,10 @@ class MockElement {
   }
 }
 
-function makeCalendarPayload(days = [{ date: '2026-09-08', count: 1, level: 1, symbol: '○' }]) {
+function makeCalendarPayload(
+  days = [{ date: '2026-09-08', count: 1, level: 1, symbol: '○' }],
+  detailRevision = 'revision-a',
+) {
   return {
     ok: true,
     data: {
@@ -243,6 +247,7 @@ function makeCalendarPayload(days = [{ date: '2026-09-08', count: 1, level: 1, s
         { level: 3, symbol: '×', label: '混雑' },
       ],
       updatedAt: '2026-09-08T07:00:00.000Z',
+      detailRevision,
       timeZone: 'Asia/Tokyo',
       spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/safe-test-id/edit?gid=1730965450',
     },
@@ -269,6 +274,8 @@ function runClientScenario(options) {
   const documentListeners = {};
   const windowListeners = {};
   const intervals = [];
+  const timeouts = [];
+  const pendingDetails = [];
   const calls = { calendar: 0, details: [] };
   const document = {
     body: new MockElement('body'),
@@ -294,8 +301,15 @@ function runClientScenario(options) {
       intervals.push({ callback, milliseconds });
       return intervals.length;
     },
-    setTimeout: (callback) => { callback(); return 1; },
-    clearTimeout() {},
+    setTimeout: (callback, milliseconds) => {
+      const timeout = { callback, milliseconds, cancelled: false };
+      timeouts.push(timeout);
+      if (!options.manualTimers) callback();
+      return timeouts.length;
+    },
+    clearTimeout(id) {
+      if (timeouts[id - 1]) timeouts[id - 1].cancelled = true;
+    },
   };
 
   class Runner {
@@ -304,12 +318,22 @@ function runClientScenario(options) {
     getCalendarData() {
       calls.calendar += 1;
       if (options.calendarFailure) this.failure(new Error(options.calendarFailure));
-      else this.success(options.calendarResponse);
+      else if (Array.isArray(options.calendarResponses)) {
+        const index = Math.min(calls.calendar - 1, options.calendarResponses.length - 1);
+        this.success(options.calendarResponses[index]);
+      } else this.success(options.calendarResponse);
     }
-    getDayDetails(dateKey) {
+    getDayDetails(dateKey, expectedRevision) {
       calls.details.push(dateKey);
       if (options.detailFailure) this.failure(new Error(options.detailFailure));
-      else this.success(options.detailResponse);
+      else if (options.deferDetails) {
+        pendingDetails.push({
+          dateKey,
+          expectedRevision,
+          resolve: (response = options.detailResponse) => this.success(response),
+          reject: (error = new Error('detail failure')) => this.failure(error),
+        });
+      } else this.success(options.detailResponse);
     }
   }
 
@@ -344,7 +368,16 @@ function runClientScenario(options) {
   };
   vm.createContext(clientContext);
   vm.runInContext(browserScript, clientContext, { filename: 'Index.html<script>' });
-  return { calls, document, documentListeners, elements, intervals, windowListeners };
+  return {
+    calls,
+    document,
+    documentListeners,
+    elements,
+    intervals,
+    pendingDetails,
+    timeouts,
+    windowListeners,
+  };
 }
 
 function makeFixture() {
@@ -484,6 +517,15 @@ const context = {
     },
   },
   Utilities: {
+    DigestAlgorithm: { SHA_256: 'SHA_256' },
+    Charset: { UTF_8: 'UTF_8' },
+    computeDigest(algorithm, value) {
+      assert.equal(algorithm, 'SHA_256');
+      return Array.from(crypto.createHash('sha256').update(value, 'utf8').digest());
+    },
+    base64EncodeWebSafe(bytes) {
+      return Buffer.from(bytes).toString('base64url');
+    },
     formatDate,
   },
 };
@@ -511,6 +553,7 @@ assert.deepEqual(
 );
 assert.deepEqual(Object.keys(calendar.days[0]).sort(), ['count', 'date', 'level', 'symbol']);
 assert.doesNotMatch(JSON.stringify(calendar), /customer|content|period|work|sheetId|generation/);
+assert.match(calendar.detailRevision, /^[A-Za-z0-9_-]{43}$/);
 assert.equal(
   calendar.spreadsheetUrl,
   'https://docs.google.com/spreadsheets/d/1KOHReFlDdmJvLWX16Qram6TSogWMXwW4ddWRI6uWjfY/edit?gid=1730965450',
@@ -528,7 +571,17 @@ const metricsBeforeWarmHit = copySpreadsheetMetrics();
 const warmCacheHit = context.getDayDetails('2026-01-01');
 assert.equal(warmCacheHit.ok, true);
 assert.equal(warmCacheHit.data.items.length, 2);
+assert.equal(warmCacheHit.data.revision, calendar.detailRevision);
 assert.deepEqual(copySpreadsheetMetrics(), metricsBeforeWarmHit);
+
+const unchangedCalendar = context.getCalendarData().data;
+assert.equal(unchangedCalendar.detailRevision, calendar.detailRevision);
+const originalCustomer = targetSheet.values[2][4];
+targetSheet.values[2][4] = '顧客B';
+const changedCalendar = context.getCalendarData().data;
+assert.notEqual(changedCalendar.detailRevision, calendar.detailRevision);
+targetSheet.values[2][4] = originalCustomer;
+assert.equal(context.getCalendarData().data.detailRevision, calendar.detailRevision);
 
 userCache.clear();
 resetSpreadsheetMetrics();
@@ -777,6 +830,7 @@ assert.match(serverSource, /CacheService\.getUserCache\(\)/);
 assert.doesNotMatch(serverSource, /getScriptCache\(\)|getDocumentCache\(\)|PropertiesService/);
 assert.match(serverSource, /detailCacheTtlSeconds:\s*75/);
 assert.match(serverSource, /generation = `\$\{sheetId\}:/);
+assert.match(serverSource, /Utilities\.DigestAlgorithm\.SHA_256/);
 assert.doesNotMatch(serverSource, /1730965450/);
 assert.doesNotMatch(serverSource, /getScheduleLayout_|CALENDAR_CONFIG\.sheetId/);
 assert.equal((serverSource.match(/resolveCurrentScheduleSheet_\(\)/g) || []).length, 3);
@@ -813,7 +867,7 @@ assert.match(htmlSource, /detailCache\.clear\(\)/);
 assert.doesNotMatch(htmlSource, /localStorage|sessionStorage|https:\/\/(?!docs\.google\.com)/);
 assert.doesNotMatch(htmlSource, /error\.message|Sensitive Google details|Service invoked too many times/);
 assert.match(htmlSource, /withFailureHandler\(\(\) => reject\(\{ code: ERROR_CODES\.dataFetchFailed \}\)\)/);
-assert.equal((htmlSource.match(/\.getDayDetails\(dateKey\)/g) || []).length, 1);
+assert.equal((htmlSource.match(/\.getDayDetails\(dateKey, requestedRevision\)/g) || []).length, 1);
 assert.equal((htmlSource.match(/\.getCalendarData\(\)/g) || []).length, 1);
 assert.deepEqual(
   Array.from(
@@ -883,7 +937,10 @@ async function testClientBehavior() {
   const thresholdUi = runClientScenario({
     calendarResponse: makeCalendarPayload(thresholdDays),
     hoverCapable: true,
-    detailResponse: { ok: true, data: { date: '2026-09-12', items: [] } },
+    detailResponse: {
+      ok: true,
+      data: { date: '2026-09-12', items: [], revision: 'revision-a' },
+    },
   });
   const thresholdCells = new Map(
     thresholdUi.elements.get('calendar-grid').children
@@ -951,8 +1008,14 @@ async function testClientBehavior() {
   assert.equal(rolloverUi.elements.get('month-title').textContent, '2026年 9月');
 
   const hoverUi = runClientScenario({
-    calendarResponse: makeCalendarPayload(),
+    calendarResponses: [
+      makeCalendarPayload(undefined, 'revision-a'),
+      makeCalendarPayload(undefined, 'revision-a'),
+      makeCalendarPayload(undefined, 'revision-b'),
+    ],
+    deferDetails: true,
     hoverCapable: true,
+    manualTimers: true,
     detailResponse: {
       ok: true,
       data: {
@@ -962,16 +1025,24 @@ async function testClientBehavior() {
           { customer: '東洋染化', content: '', work: 'シート入', period: 'AM' },
           { customer: '期間未設定', content: '', work: '梱包', period: '' },
         ],
+        revision: 'revision-a',
       },
     },
   });
-  const hoverButton = hoverUi.elements
+  let hoverButton = hoverUi.elements
     .get('calendar-grid')
     .children
     .find((element) => element.dataset.date === '2026-09-08');
   assert.ok(hoverButton.listeners.pointerenter);
   hoverButton.listeners.pointerenter[0]();
-  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(hoverUi.calls.details, ['2026-09-08']);
+  assert.equal(hoverUi.pendingDetails[0].expectedRevision, 'revision-a');
+  assert.equal(hoverUi.elements.get('hover-preview').hidden, true);
+  assert.equal(hoverUi.timeouts[0].milliseconds, 250);
+  const firstHoverRender = hoverUi.timeouts[0].callback();
+  assert.equal(hoverUi.elements.get('hover-preview').children[1].textContent, '読み込み中…');
+  hoverUi.pendingDetails[0].resolve();
+  await firstHoverRender;
   assert.equal(hoverUi.elements.get('hover-preview').hidden, false);
   assert.equal(hoverUi.elements.get('hover-preview').children[0].textContent, '9月8日（火）');
   assert.deepEqual(
@@ -990,6 +1061,7 @@ async function testClientBehavior() {
           { customer: '東洋染化', content: '', work: 'シート入', period: 'AM' },
           { customer: '期間未設定', content: '', work: '梱包' },
         ],
+        revision: 'revision-a',
       },
     },
   });
@@ -1007,6 +1079,67 @@ async function testClientBehavior() {
       ['期間未設定', '梱包'],
     ],
   );
+
+  hoverButton.listeners.pointerleave[0]();
+  hoverButton.listeners.pointerenter[0]();
+  await Promise.resolve();
+  await hoverUi.timeouts[1].callback();
+  assert.deepEqual(hoverUi.calls.details, ['2026-09-08']);
+  assert.notEqual(hoverUi.elements.get('hover-preview').children[1].textContent, '読み込み中…');
+
+  await hoverButton.listeners.click[0]();
+  assert.deepEqual(hoverUi.calls.details, ['2026-09-08']);
+  assert.equal(hoverUi.elements.get('detail-backdrop').hidden, false);
+  assert.equal(hoverUi.elements.get('detail-body').children[0].children[0].children[0].textContent, '高井屋 / DINOサブレ箱');
+  hoverUi.elements.get('detail-close').listeners.click[0]();
+
+  hoverUi.intervals[0].callback();
+  hoverButton = hoverUi.elements
+    .get('calendar-grid')
+    .children
+    .find((element) => element.dataset.date === '2026-09-08');
+  hoverButton.listeners.pointerenter[0]();
+  await Promise.resolve();
+  await hoverUi.timeouts[2].callback();
+  assert.deepEqual(hoverUi.calls.details, ['2026-09-08']);
+
+  hoverButton.listeners.pointerleave[0]();
+  hoverUi.intervals[0].callback();
+  hoverButton = hoverUi.elements
+    .get('calendar-grid')
+    .children
+    .find((element) => element.dataset.date === '2026-09-08');
+  hoverButton.listeners.pointerenter[0]();
+  assert.deepEqual(hoverUi.calls.details, ['2026-09-08', '2026-09-08']);
+  assert.equal(hoverUi.pendingDetails[1].expectedRevision, 'revision-b');
+  const changedHoverRender = hoverUi.timeouts[3].callback();
+  hoverUi.pendingDetails[1].resolve({
+    ok: true,
+    data: {
+      date: '2026-09-08',
+      items: [{ customer: '顧客B', content: '案件B', work: '印刷', period: '午後' }],
+      revision: 'revision-b',
+    },
+  });
+  await changedHoverRender;
+  assert.equal(hoverUi.elements.get('hover-preview').children[1].children[0].textContent, '顧客B：印刷（午後）');
+
+  const mobileUi = runClientScenario({
+    calendarResponse: makeCalendarPayload(),
+    hoverCapable: false,
+    detailResponse: {
+      ok: true,
+      data: { date: '2026-09-08', items: [], revision: 'revision-a' },
+    },
+  });
+  const mobileButton = mobileUi.elements
+    .get('calendar-grid')
+    .children
+    .find((element) => element.dataset.date === '2026-09-08');
+  assert.equal(Boolean(mobileButton.listeners.pointerenter), false);
+  await mobileButton.listeners.click[0]();
+  assert.deepEqual(mobileUi.calls.details, ['2026-09-08']);
+  assert.equal(mobileUi.elements.get('detail-backdrop').hidden, false);
 
   const denied = runClientScenario({
     calendarResponse: { ok: false, error: { code: 'ACCESS_DENIED' } },
@@ -1064,7 +1197,11 @@ testClientBehavior().then(() => {
   console.log('PASS: calendar, day details, and Spreadsheet gid share the same resolver');
   console.log('PASS: initial success reveals link; initial failures keep URL absent and link hidden');
   console.log('PASS: AM/PM and missing-period formatting in hover preview and detail modal');
-  console.log('PASS: permission messages, hover preview, and getDayDetails modal-only error handling');
+  console.log('PASS: initial hover starts immediately and waits 250 ms before preview display');
+  console.log('PASS: pending hover shows loading, then switches to fetched details');
+  console.log('PASS: second hover and hover-followed-by-click reuse one detail request');
+  console.log('PASS: unchanged 60-second refresh retains details; changed revision invalidates them');
+  console.log('PASS: permission messages, PC hover, mobile tap, and modal-only detail errors');
 }).catch((error) => {
   console.error(error);
   process.exitCode = 1;

@@ -38,6 +38,7 @@ const fixture = {
     days,
     levels: symbols.map((symbol, level) => ({ level, symbol, label: labels[level] })),
     updatedAt: '2026-09-10T03:34:56.000Z',
+    detailRevision: 'local-preview-revision',
     timeZone: 'Asia/Tokyo',
     spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/local-preview/edit?gid=123',
   },
@@ -52,6 +53,7 @@ const detail = {
       { customer: 'テスト案件', content: 'カタログ', work: '印刷', period: 'PM' },
       { customer: '期間未設定', content: '確認用', work: 'シート入', period: '' },
     ],
+    revision: 'local-preview-revision',
   },
 };
 

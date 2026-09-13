@@ -618,11 +618,13 @@
         let calendarData = new Map();
         let hasLoadedSuccessfully = false;
         let isLoading = false;
+        let detailRevision = null;
         let detailGeneration = 0;
         let modalRequestToken = 0;
         let hoverRequestToken = 0;
         let hoverTimer = 0;
         let lastFocusedElement = null;
+        let activeModalDate = null;
         const detailCache = new Map();
         const detailPending = new Map();
 
@@ -833,6 +835,14 @@
 
           const data = response.data;
           const days = Array.isArray(data.days) ? data.days : [];
+          const nextDetailRevision = typeof data.detailRevision === 'string'
+            ? data.detailRevision
+            : null;
+          const detailRevisionChanged = detailRevision !== null
+            && detailRevision !== nextDetailRevision;
+          detailRevision = nextDetailRevision;
+          if (detailRevisionChanged) invalidateDetailCache();
+          else cancelHover();
           chooseInitialMonth(days);
           calendarData = new Map(days.map((day) => [day.date, day]));
           hasLoadedSuccessfully = true;
@@ -843,6 +853,7 @@
           renderLegend(Array.isArray(data.levels) ? data.levels : FALLBACK_LEVELS);
           renderCalendar();
           setLoading(false);
+          if (detailRevisionChanged) refreshOpenDetails();
         }
 
         function handleCalendarError(code) {
@@ -866,7 +877,6 @@
 
         function refreshCalendar() {
           if (isLoading) return;
-          invalidateDetailCache();
           setLoading(true);
           google.script.run
             .withSuccessHandler(handleCalendarResponse)
@@ -879,6 +889,7 @@
           if (detailPending.has(dateKey)) return detailPending.get(dateKey);
 
           const generation = detailGeneration;
+          const requestedRevision = detailRevision;
           let request;
           request = new Promise((resolve, reject) => {
             google.script.run
@@ -888,15 +899,22 @@
                   return;
                 }
                 const data = response.data;
+                if (generation !== detailGeneration) {
+                  reject({ code: ERROR_CODES.dataFetchFailed });
+                  return;
+                }
                 const result = {
                   date: data.date === dateKey ? data.date : dateKey,
                   items: Array.isArray(data.items) ? data.items : [],
+                  revision: typeof data.revision === 'string' ? data.revision : null,
                 };
-                if (generation === detailGeneration) detailCache.set(dateKey, result);
+                if (!requestedRevision || result.revision === requestedRevision) {
+                  detailCache.set(dateKey, result);
+                }
                 resolve(result);
               })
               .withFailureHandler(() => reject({ code: ERROR_CODES.dataFetchFailed }))
-              .getDayDetails(dateKey);
+              .getDayDetails(dateKey, requestedRevision);
           }).finally(() => {
             if (detailPending.get(dateKey) === request) detailPending.delete(dateKey);
           });
@@ -977,6 +995,7 @@
         async function openDetails(dateKey, trigger) {
           cancelHover();
           lastFocusedElement = trigger;
+          activeModalDate = dateKey;
           const requestToken = ++modalRequestToken;
           elements.detailTitle.textContent = formatDateHeading(dateKey);
           elements.detailBackdrop.hidden = false;
@@ -994,9 +1013,25 @@
           }
         }
 
+        async function refreshOpenDetails() {
+          if (elements.detailBackdrop.hidden || !activeModalDate) return;
+          const dateKey = activeModalDate;
+          const requestToken = ++modalRequestToken;
+          showDetailLoading();
+          try {
+            const result = await loadDayDetails(dateKey);
+            if (requestToken !== modalRequestToken || elements.detailBackdrop.hidden) return;
+            renderDetailItems(result.items);
+          } catch (error) {
+            if (requestToken !== modalRequestToken || elements.detailBackdrop.hidden) return;
+            showDetailError(error && error.code);
+          }
+        }
+
         function closeDetails() {
           if (elements.detailBackdrop.hidden) return;
           modalRequestToken += 1;
+          activeModalDate = null;
           elements.detailBackdrop.hidden = true;
           document.body.classList.remove('modal-open');
           if (lastFocusedElement && document.contains(lastFocusedElement)) lastFocusedElement.focus();
@@ -1070,18 +1105,29 @@
           if (!hoverCapable.matches) return;
           window.clearTimeout(hoverTimer);
           const requestToken = ++hoverRequestToken;
+          let settled = false;
+          const request = loadDayDetails(dateKey).then(
+            (result) => {
+              settled = true;
+              return { result };
+            },
+            (error) => {
+              settled = true;
+              return { error };
+            },
+          );
           hoverTimer = window.setTimeout(async () => {
-            showPreviewMessage(anchor, dateKey, '読み込み中…');
-            try {
-              const result = await loadDayDetails(dateKey);
-              if (requestToken !== hoverRequestToken) return;
-              renderPreview(anchor, dateKey, result.items);
-            } catch (error) {
-              if (requestToken !== hoverRequestToken) return;
+            if (requestToken !== hoverRequestToken) return;
+            if (!settled) showPreviewMessage(anchor, dateKey, '読み込み中…');
+            const outcome = await request;
+            if (requestToken !== hoverRequestToken) return;
+            if (outcome.result) {
+              renderPreview(anchor, dateKey, outcome.result.items);
+            } else {
               showPreviewMessage(
                 anchor,
                 dateKey,
-                error && error.code === ERROR_CODES.accessDenied
+                outcome.error && outcome.error.code === ERROR_CODES.accessDenied
                   ? '概要を表示する権限がありません。'
                   : '概要を取得できませんでした。',
               );
