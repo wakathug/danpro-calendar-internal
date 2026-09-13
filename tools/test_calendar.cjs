@@ -348,7 +348,7 @@ function runClientScenario(options) {
 }
 
 function makeFixture() {
-  const values = blankSheet(9, 16);
+  const values = blankSheet(9, 17);
   Object.assign(values[1], {
     1: '受付',
     2: '依頼',
@@ -359,42 +359,43 @@ function makeFixture() {
     7: '内容',
     9: '状況',
     10: 'ロット',
-    11: '日時',
-    12: '2025/12/31',
-    13: '1/1',
-    14: '1/2',
-    15: '2026/1/2',
+    11: '納品\n方法',
+    12: '日時',
+    13: '2025/12/31',
+    14: '1/1',
+    15: '1/2',
+    16: '2026/1/2',
   });
 
   Object.assign(values[2], {
-    0: '－', 4: '顧客A', 7: 'ギフト箱', 11: 'AM', 12: 'CAD', 15: '印刷',
+    0: '－', 4: '顧客A', 7: 'ギフト箱', 12: 'AM', 13: 'CAD', 16: '印刷',
   });
   Object.assign(values[3], {
-    11: 'PM', 12: '印刷', 13: 'デザイン', 14: '   ',
+    12: 'PM', 13: '印刷', 14: 'デザイン', 15: '   ',
   });
   Object.assign(values[4], {
-    0: '－', 7: '内容のみ', 11: 'AM', 13: 'サンプル', 14: 'KCP',
+    0: '－', 7: '内容のみ', 12: 'AM', 14: 'サンプル', 15: 'KCP',
   });
   Object.assign(values[5], {
-    4: '客先のみ', 11: 'ＰＭ', 14: '納品',
+    4: '客先のみ', 12: 'ＰＭ', 15: '納品',
   });
 
   // この行と以降は集計・詳細の対象外でなければならない。
   Object.assign(values[6], {
-    0: '案件数', 4: '除外顧客', 7: '除外内容', 11: 'AM',
-    12: '除外', 13: '除外', 14: '除外', 15: '除外',
+    0: '案件数', 4: '除外顧客', 7: '除外内容', 12: 'AM',
+    13: '除外', 14: '除外', 15: '除外', 16: '除外',
   });
   Object.assign(values[7], {
-    4: 'さらに除外', 11: 'PM', 13: '除外',
+    4: 'さらに除外', 12: 'PM', 14: '除外',
   });
   return values;
 }
 
 function makeScheduleSheet(id, name, options = {}) {
   const values = makeFixture().map((row) => row.slice());
-  if (options.firstHeader) values[1][12] = options.firstHeader;
+  if (options.firstHeader) values[1][13] = options.firstHeader;
   if (options.customer) values[2][4] = options.customer;
-  if (options.work) values[2][12] = options.work;
+  if (options.work) values[2][13] = options.work;
   return new MockSheet(id, values, {
     name,
     hidden: options.hidden,
@@ -407,33 +408,35 @@ function makeScheduleSheet(id, name, options = {}) {
 }
 
 function makeMergedDetailsSheet() {
-  const values = blankSheet(16, 16);
-  values[1][12] = '2026/9/10';
+  const values = blankSheet(16, 14);
+  values[1][13] = '2026/9/10';
 
   Object.assign(values[4], {
-    4: '別案件', 7: '別内容', 11: 'AM',
+    4: '別案件', 7: '別内容', 12: 'AM',
   });
   Object.assign(values[5], {
-    11: 'PM', 12: '納品',
+    12: 'PM', 13: '納品',
   });
 
   Object.assign(values[9], {
-    0: '－', 4: '高井屋', 7: 'DINOサブレ箱', 11: 'AM',
+    0: '－', 4: '高井屋', 7: 'DINOサブレ箱', 12: 'AM',
   });
   Object.assign(values[10], {
-    11: 'PM', 12: '印刷',
+    12: 'PM', 13: '印刷',
   });
   Object.assign(values[11], {
-    11: 'AM', 12: 'デザイン',
+    12: 'AM', 13: 'デザイン',
   });
   Object.assign(values[12], {
-    11: 'PM', 12: '出荷',
+    12: 'PM', 13: '出荷',
   });
   values[13][0] = '案件数';
 
   return new MockSheet(6006, values, {
     name: '結合セル詳細',
     mergedRanges: [
+      { row: 5, column: 12, rowCount: 2, columnCount: 1 },
+      { row: 10, column: 12, rowCount: 4, columnCount: 1 },
       { row: 10, column: 5, rowCount: 4, columnCount: 1 },
       { row: 10, column: 8, rowCount: 4, columnCount: 1 },
     ],
@@ -623,8 +626,8 @@ assert.equal(newYearDetails.items.length, 2);
 assert.deepEqual(
   Array.from(newYearDetails.items, (item) => ({ ...item })),
   [
-    { customer: '顧客A', content: 'ギフト箱', work: 'デザイン', period: '午後' },
-    { customer: '', content: '内容のみ', work: 'サンプル', period: '午前' },
+    { customer: '顧客A', content: 'ギフト箱', work: 'デザイン', period: 'PM' },
+    { customer: '', content: '内容のみ', work: 'サンプル', period: 'AM' },
   ],
 );
 assert.ok(newYearDetails.items.every((item) => item.work !== 'KCP' && item.work !== '除外'));
@@ -633,11 +636,12 @@ const januarySecond = context.getDayDetails('2026-01-02').data;
 assert.deepEqual(
   Array.from(januarySecond.items, (item) => ({ ...item })),
   [
-    { customer: '顧客A', content: 'ギフト箱', work: '印刷', period: '午前' },
-    { customer: '', content: '内容のみ', work: 'KCP', period: '午前' },
-    { customer: '客先のみ', content: '内容のみ', work: '納品', period: '午後' },
+    { customer: '顧客A', content: 'ギフト箱', work: '印刷', period: 'AM' },
+    { customer: '', content: '内容のみ', work: 'KCP', period: 'AM' },
+    { customer: '客先のみ', content: '内容のみ', work: '納品', period: 'PM' },
   ],
 );
+assert.ok(januarySecond.items.every((item) => item.period === 'AM' || item.period === 'PM'));
 
 const workTypeCases = [
   ['印刷', true],
@@ -666,13 +670,13 @@ assert.deepEqual(
 );
 
 const mixedValues = makeFixture().map((row) => row.slice());
-for (let column = 12; column <= 15; column += 1) mixedValues[1][column] = '2026/9/10';
+for (let column = 13; column <= 16; column += 1) mixedValues[1][column] = '2026/9/10';
 for (let row = 2; row <= 5; row += 1) {
-  for (let column = 12; column <= 15; column += 1) mixedValues[row][column] = '';
+  for (let column = 13; column <= 16; column += 1) mixedValues[row][column] = '';
 }
 ['デザイン', '印刷', 'CAD', '納品', '工場', 'サンプル'].forEach((work, index) => {
   const row = 2 + Math.floor(index / 4);
-  const column = 12 + (index % 4);
+  const column = 13 + (index % 4);
   mixedValues[row][column] = work;
 });
 spreadsheetSheets = [new MockSheet(5005, mixedValues, { name: '混在日' })];
@@ -691,16 +695,21 @@ const mergedDetails = context.getDayDetails('2026-09-10').data;
 assert.deepEqual(
   Array.from(mergedDetails.items, (item) => ({ ...item })),
   [
-    { customer: '', content: '', work: '納品', period: '午後' },
-    { customer: '高井屋', content: 'DINOサブレ箱', work: '印刷', period: '午後' },
-    { customer: '高井屋', content: 'DINOサブレ箱', work: 'デザイン', period: '午前' },
-    { customer: '高井屋', content: 'DINOサブレ箱', work: '出荷', period: '午後' },
+    { customer: '', content: '', work: '納品', period: 'PM' },
+    { customer: '高井屋', content: 'DINOサブレ箱', work: '印刷', period: 'PM' },
+    { customer: '高井屋', content: 'DINOサブレ箱', work: 'デザイン', period: 'AM' },
+    { customer: '高井屋', content: 'DINOサブレ箱', work: '出荷', period: 'PM' },
   ],
 );
 assert.ok(mergedDetails.items.every((item) => (
   Object.keys(item).sort().join(',') === 'content,customer,period,work'
 )));
+assert.ok(mergedDetails.items.every((item) => item.period === 'AM' || item.period === 'PM'));
 assert.deepEqual(copySpreadsheetMetrics(), metricsBeforeMergedDetailsHit);
+assert.equal(context.normalizePeriod_('AM'), 'AM');
+assert.equal(context.normalizePeriod_('ＰＭ'), 'PM');
+assert.equal(context.normalizePeriod_(''), '');
+assert.equal(context.normalizePeriod_('不明'), '');
 spreadsheetSheets = [descriptionSheet, targetSheet];
 assert.equal(context.getCalendarData().ok, true);
 
@@ -771,6 +780,8 @@ assert.match(serverSource, /generation = `\$\{sheetId\}:/);
 assert.doesNotMatch(serverSource, /1730965450/);
 assert.doesNotMatch(serverSource, /getScheduleLayout_|CALENDAR_CONFIG\.sheetId/);
 assert.equal((serverSource.match(/resolveCurrentScheduleSheet_\(\)/g) || []).length, 3);
+assert.equal(vm.runInContext('CALENDAR_CONFIG.periodColumn', context), 13);
+assert.equal(vm.runInContext('CALENDAR_CONFIG.dateStartColumn', context), 14);
 assert.match(serverSource, /buildSpreadsheetUrl_\(layout\.sheetId\)/);
 assert.match(serverSource, /for \(let index = 0; index < sheets\.length; index \+= 1\)/);
 assert.doesNotMatch(serverSource, /getName\(\)/);
@@ -946,7 +957,11 @@ async function testClientBehavior() {
       ok: true,
       data: {
         date: '2026-09-08',
-        items: [{ customer: '顧客A', content: '案件A', work: 'デザイン', period: '午前' }],
+        items: [
+          { customer: '高井屋', content: 'DINOサブレ箱', work: '印刷', period: 'PM' },
+          { customer: '東洋染化', content: '', work: 'シート入', period: 'AM' },
+          { customer: '期間未設定', content: '', work: '梱包', period: '' },
+        ],
       },
     },
   });
@@ -956,10 +971,42 @@ async function testClientBehavior() {
     .find((element) => element.dataset.date === '2026-09-08');
   assert.ok(hoverButton.listeners.pointerenter);
   hoverButton.listeners.pointerenter[0]();
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(hoverUi.elements.get('hover-preview').hidden, false);
   assert.equal(hoverUi.elements.get('hover-preview').children[0].textContent, '9月8日（火）');
+  assert.deepEqual(
+    hoverUi.elements.get('hover-preview').children[1].children.map((item) => item.textContent),
+    ['高井屋：印刷（午後）', '東洋染化：シート入（午前）', '期間未設定：梱包'],
+  );
+
+  const modalUi = runClientScenario({
+    calendarResponse: makeCalendarPayload(),
+    detailResponse: {
+      ok: true,
+      data: {
+        date: '2026-09-08',
+        items: [
+          { customer: '高井屋', content: 'DINOサブレ箱', work: '印刷', period: 'PM' },
+          { customer: '東洋染化', content: '', work: 'シート入', period: 'AM' },
+          { customer: '期間未設定', content: '', work: '梱包' },
+        ],
+      },
+    },
+  });
+  const modalButton = modalUi.elements
+    .get('calendar-grid')
+    .children
+    .find((element) => element.dataset.date === '2026-09-08');
+  await modalButton.listeners.click[0]();
+  const modalCards = modalUi.elements.get('detail-body').children[0].children;
+  assert.deepEqual(
+    modalCards.map((card) => [card.children[0].textContent, card.children[1].textContent]),
+    [
+      ['高井屋 / DINOサブレ箱', '印刷（午後）'],
+      ['東洋染化', 'シート入（午前）'],
+      ['期間未設定', '梱包'],
+    ],
+  );
 
   const denied = runClientScenario({
     calendarResponse: { ok: false, error: { code: 'ACCESS_DENIED' } },
@@ -1016,6 +1063,7 @@ testClientBehavior().then(() => {
   console.log('PASS: leftmost valid visible schedule follows tab insertion, reorder, and rename');
   console.log('PASS: calendar, day details, and Spreadsheet gid share the same resolver');
   console.log('PASS: initial success reveals link; initial failures keep URL absent and link hidden');
+  console.log('PASS: AM/PM and missing-period formatting in hover preview and detail modal');
   console.log('PASS: permission messages, hover preview, and getDayDetails modal-only error handling');
 }).catch((error) => {
   console.error(error);

@@ -930,12 +930,23 @@
             const work = document.createElement('p');
             work.className = 'detail-work';
             const workText = String(item.work || '').trim() || '作業内容未設定';
-            const period = String(item.period || '').trim();
-            work.textContent = period ? `${workText}（${period}）` : workText;
+            work.textContent = formatWorkWithPeriod(workText, item.period);
             card.append(subject, work);
             list.appendChild(card);
           });
           elements.detailBody.appendChild(list);
+        }
+
+        function formatPeriodLabel(period) {
+          const normalized = String(period || '').trim().normalize('NFKC').toUpperCase();
+          if (normalized === 'AM' || normalized === '午前') return '午前';
+          if (normalized === 'PM' || normalized === '午後') return '午後';
+          return '';
+        }
+
+        function formatWorkWithPeriod(work, period) {
+          const periodLabel = formatPeriodLabel(period);
+          return periodLabel ? `${work}（${periodLabel}）` : work;
         }
 
         function showDetailLoading() {
@@ -996,8 +1007,7 @@
           const content = String(item.content || '').trim();
           const subject = customer || content || '案件';
           const work = String(item.work || '').trim() || '作業内容未設定';
-          const period = String(item.period || '').trim();
-          return `${subject}：${period ? `${work}（${period}）` : work}`;
+          return `${subject}：${formatWorkWithPeriod(work, item.period)}`;
         }
 
         function positionPreview(anchor) {

@@ -48,8 +48,9 @@ const detail = {
   data: {
     date: '2026-09-01',
     items: [
-      { customer: 'サンプル顧客', content: 'パッケージ', work: 'デザイン', period: '午前' },
-      { customer: 'テスト案件', content: 'カタログ', work: '印刷', period: '午後' },
+      { customer: 'サンプル顧客', content: 'パッケージ', work: 'デザイン', period: 'AM' },
+      { customer: 'テスト案件', content: 'カタログ', work: '印刷', period: 'PM' },
+      { customer: '期間未設定', content: '確認用', work: 'シート入', period: '' },
     ],
   },
 };
@@ -70,7 +71,6 @@ const stub = `<script>
     Object.defineProperty(window.google.script, 'run', { get: () => new Runner() });
     if (new URLSearchParams(location.search).get('mode') === 'hover') {
       window.matchMedia = () => ({ matches: true });
-      window.setTimeout = (callback) => { callback(); return 1; };
     }
   })();
 </script>`;

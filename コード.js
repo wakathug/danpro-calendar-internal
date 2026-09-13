@@ -3,10 +3,10 @@ const CALENDAR_CONFIG = Object.freeze({
   timeZone: 'Asia/Tokyo',
   headerRow: 2,
   dataStartRow: 3,
-  dateStartColumn: 13,
+  dateStartColumn: 14,
   customerColumn: 5,
   contentColumn: 8,
-  periodColumn: 12,
+  periodColumn: 13,
   endMarker: '案件数',
   detailCacheTtlSeconds: 75,
   detailCacheActiveKey: 'day-details:active:v1',
@@ -78,7 +78,7 @@ function getCalendarData_() {
     });
 
   if (days.length === 0) {
-    throw new Error('M列以降の2行目に有効な日付が見つかりません。');
+    throw new Error('N列以降の2行目に有効な日付が見つかりません。');
   }
 
   return {
@@ -96,7 +96,7 @@ function getCalendarData_() {
 
 /**
  * 指定された1日分だけの案件詳細を読み取ります。
- * 返す項目は客先名、内容、当日の作業内容、AM/PMの日本語表記に限定します。
+ * 返す項目は客先名、内容、当日の作業内容、AM/PMに限定します。
  *
  * @param {string} dateKey yyyy-MM-dd形式の日付
  * @return {{ok: boolean, data: Object}|{ok: false, error: {code: string}}}
@@ -249,6 +249,7 @@ function buildSpreadsheetUrl_(sheetId) {
 /**
  * E列から日付領域末尾までを1回で読み取り、混雑数と日付別詳細を同時に作成します。
  * 結合範囲はE〜H列を1回だけ調べ、E/H列の空欄値を左上値で補完します。
+ * AM/PMは、結合されたL列（納品方法）ではなく、工程と同じ行のM列から直接取得します。
  *
  * @param {{sheet: Sheet, sheetId: number, dataRowCount: number,
  *   dateColumnCount: number, parsedHeaders: Array<?Date>}} layout
@@ -517,9 +518,9 @@ function formatDateKey_(date) {
 /** @return {string} */
 function normalizePeriod_(value) {
   const normalized = normalizePeriodCode_(value);
-  if (normalized === 'AM' || normalized === '午前') return '午前';
-  if (normalized === 'PM' || normalized === '午後') return '午後';
-  return trimmed_(value);
+  if (normalized === 'AM' || normalized === '午前') return 'AM';
+  if (normalized === 'PM' || normalized === '午後') return 'PM';
+  return '';
 }
 
 /** @return {string} */
