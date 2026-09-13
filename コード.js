@@ -57,18 +57,34 @@ function getCalendarData() {
 /**
  * @return {{days: Array<{date: string, count: number, level: number, symbol: string}>,
  *   levels: Array<{level: number, symbol: string, label: string}>, updatedAt: string,
- *   detailRevision: string, timeZone: string, spreadsheetUrl: string}}
+ *   detailRevision: string, serverTiming: Object,
+ *   timeZone: string, spreadsheetUrl: string}}
  */
 function getCalendarData_() {
-  const layout = resolveCurrentScheduleSheet_();
-  const snapshot = readScheduleSnapshot_(layout);
+  const timing = {
+    startedAt: Date.now(),
+    spreadsheetOpenMs: 0,
+    spreadsheetReadMs: 0,
+    sheetValueReadCalls: 0,
+    mergedRangeReadCalls: 0,
+    latestSheetResolutionMs: 0,
+    aggregationMs: 0,
+    revisionMs: 0,
+    detailCacheWriteMs: 0,
+  };
+  const layout = resolveCurrentScheduleSheet_(timing);
+  const snapshot = readScheduleSnapshot_(layout, timing);
+  const revisionStartedAt = Date.now();
   const detailRevision = buildDetailRevision_(layout.sheetId, snapshot);
+  timing.revisionMs = Date.now() - revisionStartedAt;
+  const cacheStartedAt = Date.now();
   cacheDayDetailsSnapshot_(
     layout.sheetId,
     snapshot.detailsByDate,
     snapshot.updatedAt,
     detailRevision,
   );
+  timing.detailCacheWriteMs = Date.now() - cacheStartedAt;
 
   const days = Object.keys(snapshot.countsByDate)
     .sort()
@@ -87,6 +103,9 @@ function getCalendarData_() {
     throw new Error('N列以降の2行目に有効な日付が見つかりません。');
   }
 
+  timing.totalMs = Date.now() - timing.startedAt;
+  delete timing.startedAt;
+  console.info(`getCalendarData timing ${JSON.stringify(timing)}`);
   return {
     days,
     levels: CALENDAR_CONFIG.levels.map((rule) => ({
@@ -96,6 +115,7 @@ function getCalendarData_() {
     })),
     updatedAt: snapshot.updatedAt,
     detailRevision,
+    serverTiming: timing,
     timeZone: CALENDAR_CONFIG.timeZone,
     spreadsheetUrl: buildSpreadsheetUrl_(layout.sheetId),
   };
@@ -191,15 +211,22 @@ function isAccessDeniedError_(error) {
  * タブ名・日付の新旧・固定sheetIdには依存しません。
  *
  * @return {{sheet: Sheet, sheetId: number, dataRowCount: number,
- *   dateColumnCount: number, parsedHeaders: Array<?Date>}}
+ *   dateColumnCount: number, parsedHeaders: Array<?Date>,
+ *   displayValues: Array<Array<string>>}}
  */
-function resolveCurrentScheduleSheet_() {
+function resolveCurrentScheduleSheet_(timing) {
+  const resolutionStartedAt = Date.now();
+  const openStartedAt = Date.now();
   const spreadsheet = SpreadsheetApp.openById(CALENDAR_CONFIG.spreadsheetId);
+  if (timing) timing.spreadsheetOpenMs += Date.now() - openStartedAt;
   const sheets = spreadsheet.getSheets();
   const now = new Date();
   for (let index = 0; index < sheets.length; index += 1) {
-    const layout = inspectScheduleSheet_(sheets[index], now);
-    if (layout) return layout;
+    const layout = inspectScheduleSheet_(sheets[index], now, timing);
+    if (layout) {
+      if (timing) timing.latestSheetResolutionMs = Date.now() - resolutionStartedAt;
+      return layout;
+    }
   }
 
   throw new Error('有効なスケジュールシートが見つかりません。');
@@ -211,9 +238,10 @@ function resolveCurrentScheduleSheet_() {
  * @param {Sheet} sheet
  * @param {Date} now
  * @return {?{sheet: Sheet, sheetId: number, dataRowCount: number,
- *   dateColumnCount: number, parsedHeaders: Array<?Date>}}
+ *   dateColumnCount: number, parsedHeaders: Array<?Date>,
+ *   displayValues: Array<Array<string>>}}
  */
-function inspectScheduleSheet_(sheet, now) {
+function inspectScheduleSheet_(sheet, now, timing) {
   if (sheet.isSheetHidden()) return null;
 
   const lastRow = sheet.getLastRow();
@@ -223,28 +251,29 @@ function inspectScheduleSheet_(sheet, now) {
     || lastColumn < CALENDAR_CONFIG.dateStartColumn
   ) return null;
 
-  const markerValues = sheet
-    .getRange(
-      CALENDAR_CONFIG.dataStartRow,
-      1,
-      lastRow - CALENDAR_CONFIG.dataStartRow + 1,
-      1,
-    )
-    .getDisplayValues();
-  const markerOffset = markerValues.findIndex(
+  const sheetReadStartedAt = Date.now();
+  const loadedRange = sheet.getRange(
+    CALENDAR_CONFIG.headerRow,
+    1,
+    lastRow - CALENDAR_CONFIG.headerRow + 1,
+    lastColumn,
+  );
+  const displayValues = loadedRange.getDisplayValues();
+  if (timing) {
+    timing.spreadsheetReadMs += Date.now() - sheetReadStartedAt;
+    timing.sheetValueReadCalls += 1;
+  }
+  const dataRowOffset = CALENDAR_CONFIG.dataStartRow - CALENDAR_CONFIG.headerRow;
+  const markerOffset = displayValues.slice(dataRowOffset).findIndex(
     (row) => String(row[0] == null ? '' : row[0]) === CALENDAR_CONFIG.endMarker,
   );
   if (markerOffset <= 0) return null;
 
   const dateColumnCount = lastColumn - CALENDAR_CONFIG.dateStartColumn + 1;
-  const headerValues = sheet
-    .getRange(
-      CALENDAR_CONFIG.headerRow,
-      CALENDAR_CONFIG.dateStartColumn,
-      1,
-      dateColumnCount,
-    )
-    .getValues()[0];
+  const headerValues = displayValues[0].slice(
+    CALENDAR_CONFIG.dateStartColumn - 1,
+    CALENDAR_CONFIG.dateStartColumn - 1 + dateColumnCount,
+  );
   const parsedHeaders = parseDateHeaders_(headerValues, now);
   if (!parsedHeaders.some((date) => Boolean(date))) return null;
 
@@ -254,6 +283,7 @@ function inspectScheduleSheet_(sheet, now) {
     dataRowCount: markerOffset,
     dateColumnCount,
     parsedHeaders,
+    displayValues,
   };
 }
 
@@ -268,11 +298,12 @@ function buildSpreadsheetUrl_(sheetId) {
  * AM/PMは、結合されたL列（納品方法）ではなく、工程と同じ行のM列から直接取得します。
  *
  * @param {{sheet: Sheet, sheetId: number, dataRowCount: number,
- *   dateColumnCount: number, parsedHeaders: Array<?Date>}} layout
+ *   dateColumnCount: number, parsedHeaders: Array<?Date>,
+ *   displayValues: Array<Array<string>>}} layout
  * @return {{countsByDate: Object<string, number>,
  *   detailsByDate: Object<string, Array<Object>>, updatedAt: string}}
  */
-function readScheduleSnapshot_(layout) {
+function readScheduleSnapshot_(layout, timing) {
   const startRow = CALENDAR_CONFIG.dataStartRow;
   const startColumn = CALENDAR_CONFIG.customerColumn;
   const lastColumn = CALENDAR_CONFIG.dateStartColumn + layout.dateColumnCount - 1;
@@ -294,9 +325,11 @@ function readScheduleSnapshot_(layout) {
     return { countsByDate, detailsByDate, updatedAt };
   }
 
-  const dataValues = layout.sheet
-    .getRange(startRow, startColumn, layout.dataRowCount, columnCount)
-    .getDisplayValues();
+  const dataRowOffset = startRow - CALENDAR_CONFIG.headerRow;
+  const dataValues = layout.displayValues
+    .slice(dataRowOffset, dataRowOffset + layout.dataRowCount)
+    .map((row) => row.slice(startColumn - 1, startColumn - 1 + columnCount));
+  const mergedReadStartedAt = Date.now();
   const mergedRanges = layout.sheet
     .getRange(
       startRow,
@@ -305,6 +338,11 @@ function readScheduleSnapshot_(layout) {
       CALENDAR_CONFIG.contentColumn - CALENDAR_CONFIG.customerColumn + 1,
     )
     .getMergedRanges();
+  if (timing) {
+    timing.spreadsheetReadMs += Date.now() - mergedReadStartedAt;
+    timing.mergedRangeReadCalls += 1;
+  }
+  const aggregationStartedAt = Date.now();
   const customerValues = resolveMergedDisplayColumn_(
     dataValues,
     startRow,
@@ -338,6 +376,8 @@ function readScheduleSnapshot_(layout) {
       }
     });
   });
+
+  if (timing) timing.aggregationMs += Date.now() - aggregationStartedAt;
 
   return { countsByDate, detailsByDate, updatedAt };
 }

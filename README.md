@@ -32,3 +32,9 @@ N列以降の日別スケジュール領域で、セルの値を文字列化し�
 PCでは日付へポインターが入った瞬間に詳細取得を開始し、プレビュー表示だけを250ms遅らせます。同じ日付の取得中Promiseと取得済み結果はhoverとクリックで共有するため、hover後に詳細モーダルを開いても再通信しません。スマートフォンでは従来どおりタップで詳細モーダルを開きます。
 
 Spreadsheetから読み取った詳細表示対象データとsheetIdをSHA-256で要約した`detailRevision`を返します。60秒更新後もrevisionが同じ場合はブラウザーの詳細キャッシュを維持し、内容または対象シートが変わった場合だけ破棄して再取得します。開いている詳細モーダルもrevision変更時に更新します。顧客情報の全件データはブラウザーへ送信せず、revisionは内容を復元できないハッシュ値だけを返します。
+
+## 初期表示キャッシュと計測
+
+成功したカレンダーの`days`（date / count / level / symbol）、`levels`、`updatedAt`だけをブラウザーのlocalStorageへ最大24時間保存します。次回起動時はこれを先に描画し、直後に通常の`getCalendarData()`で最新データへ更新します。顧客名、商品名、工程詳細、period、Spreadsheet URL、detailRevisionは保存しません。アクセス拒否時は保存済みカレンダーと画面表示を消去します。
+
+サーバーは候補シートごとにヘッダー行から最終行までを1つのRangeで一括取得し、その配列を最新シート判定、集計、詳細生成、detailRevision生成で再利用します。`getCalendarData()`の応答にはSpreadsheetオープン、Range読み取り、最新シート判定、集計、revision、詳細キャッシュ保存の各所要時間を`serverTiming`として含め、ブラウザー側は初期表示の各時点を`window.__danproCalendarTiming`とコンソールへ記録します。この計測値と顧客情報はlocalStorageへ保存しません。

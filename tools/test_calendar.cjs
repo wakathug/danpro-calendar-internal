@@ -19,7 +19,7 @@ function blankSheet(rows, columns) {
 
 function displayValue(value) {
   if (value == null) return '';
-  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Date) return formatDate(value).replaceAll('-', '/');
   return String(value);
 }
 
@@ -254,6 +254,16 @@ function makeCalendarPayload(
   };
 }
 
+function makeStoredCalendar(response = makeCalendarPayload()) {
+  return {
+    version: 1,
+    savedAt: Date.parse('2026-09-10T02:55:00.000Z'),
+    days: response.data.days.map((day) => ({ ...day })),
+    levels: response.data.levels.map((level) => ({ ...level })),
+    updatedAt: response.data.updatedAt,
+  };
+}
+
 function makeCalendarDay(date, count) {
   const level = count === 0 ? 0 : count <= 2 ? 1 : count <= 4 ? 2 : 3;
   return { date, count, level, symbol: ['◎', '○', '△', '×'][level] };
@@ -275,7 +285,15 @@ function runClientScenario(options) {
   const windowListeners = {};
   const intervals = [];
   const timeouts = [];
+  const pendingCalendars = [];
   const pendingDetails = [];
+  const storageValues = new Map();
+  if (options.cachedCalendar) {
+    storageValues.set('danpro-employee-calendar:v1', JSON.stringify(options.cachedCalendar));
+  }
+  const storageCalls = { getItem: 0, setItem: 0, removeItem: 0 };
+  let performanceNow = 0;
+  const advancePerformance = (milliseconds) => { performanceNow += milliseconds; };
   const calls = { calendar: 0, details: [] };
   const document = {
     body: new MockElement('body'),
@@ -292,7 +310,30 @@ function runClientScenario(options) {
   const window = {
     innerWidth: 1280,
     innerHeight: 900,
+    localStorage: {
+      getItem(key) {
+        storageCalls.getItem += 1;
+        if (options.storageFailure) throw new Error('storage blocked');
+        return storageValues.has(key) ? storageValues.get(key) : null;
+      },
+      setItem(key, value) {
+        storageCalls.setItem += 1;
+        if (options.storageFailure) throw new Error('storage blocked');
+        storageValues.set(key, String(value));
+      },
+      removeItem(key) {
+        storageCalls.removeItem += 1;
+        if (options.storageFailure) throw new Error('storage blocked');
+        storageValues.delete(key);
+      },
+    },
     matchMedia: () => ({ matches: Boolean(options.hoverCapable) }),
+    performance: {
+      now() {
+        performanceNow += 0.5;
+        return performanceNow;
+      },
+    },
     addEventListener(name, listener) {
       windowListeners[name] ||= [];
       windowListeners[name].push(listener);
@@ -318,6 +359,12 @@ function runClientScenario(options) {
     getCalendarData() {
       calls.calendar += 1;
       if (options.calendarFailure) this.failure(new Error(options.calendarFailure));
+      else if (options.deferCalendar) {
+        pendingCalendars.push({
+          resolve: (response = options.calendarResponse) => this.success(response),
+          reject: (error = new Error('calendar failure')) => this.failure(error),
+        });
+      }
       else if (Array.isArray(options.calendarResponses)) {
         const index = Math.min(calls.calendar - 1, options.calendarResponses.length - 1);
         this.success(options.calendarResponses[index]);
@@ -370,12 +417,17 @@ function runClientScenario(options) {
   vm.runInContext(browserScript, clientContext, { filename: 'Index.html<script>' });
   return {
     calls,
+    advancePerformance,
     document,
     documentListeners,
     elements,
     intervals,
+    pendingCalendars,
     pendingDetails,
+    storageCalls,
+    storageValues,
     timeouts,
+    window,
     windowListeners,
   };
 }
@@ -560,12 +612,14 @@ assert.equal(
 );
 assert.deepEqual(copySpreadsheetMetrics(), {
   openById: 1,
-  getRange: 5,
-  getValues: 1,
-  getDisplayValues: 3,
+  getRange: 3,
+  getValues: 0,
+  getDisplayValues: 2,
   getMergedRanges: 1,
   getDisplayValue: 0,
 });
+assert.equal(calendar.serverTiming.sheetValueReadCalls, 2);
+assert.equal(calendar.serverTiming.mergedRangeReadCalls, 1);
 
 const metricsBeforeWarmHit = copySpreadsheetMetrics();
 const warmCacheHit = context.getDayDetails('2026-01-01');
@@ -590,9 +644,9 @@ assert.equal(coldCacheMiss.ok, true);
 assert.equal(coldCacheMiss.data.items.length, 2);
 assert.deepEqual(copySpreadsheetMetrics(), {
   openById: 1,
-  getRange: 5,
-  getValues: 1,
-  getDisplayValues: 3,
+  getRange: 3,
+  getValues: 0,
+  getDisplayValues: 2,
   getMergedRanges: 1,
   getDisplayValue: 0,
 });
@@ -833,7 +887,7 @@ assert.match(serverSource, /generation = `\$\{sheetId\}:/);
 assert.match(serverSource, /Utilities\.DigestAlgorithm\.SHA_256/);
 assert.doesNotMatch(serverSource, /1730965450/);
 assert.doesNotMatch(serverSource, /getScheduleLayout_|CALENDAR_CONFIG\.sheetId/);
-assert.equal((serverSource.match(/resolveCurrentScheduleSheet_\(\)/g) || []).length, 3);
+assert.equal((serverSource.match(/resolveCurrentScheduleSheet_\(/g) || []).length, 3);
 assert.equal(vm.runInContext('CALENDAR_CONFIG.periodColumn', context), 13);
 assert.equal(vm.runInContext('CALENDAR_CONFIG.dateStartColumn', context), 14);
 assert.match(serverSource, /buildSpreadsheetUrl_\(layout\.sheetId\)/);
@@ -864,7 +918,9 @@ assert.match(htmlSource, /pointerenter/);
 assert.match(htmlSource, /visibilitychange/);
 assert.match(htmlSource, /REFRESH_INTERVAL_MS = 60 \* 1000/);
 assert.match(htmlSource, /detailCache\.clear\(\)/);
-assert.doesNotMatch(htmlSource, /localStorage|sessionStorage|https:\/\/(?!docs\.google\.com)/);
+assert.match(htmlSource, /CALENDAR_STORAGE_KEY = 'danpro-employee-calendar:v1'/);
+assert.match(htmlSource, /window\.localStorage\.setItem/);
+assert.doesNotMatch(htmlSource, /sessionStorage|https:\/\/(?!docs\.google\.com)/);
 assert.doesNotMatch(htmlSource, /error\.message|Sensitive Google details|Service invoked too many times/);
 assert.match(htmlSource, /withFailureHandler\(\(\) => reject\(\{ code: ERROR_CODES\.dataFetchFailed \}\)\)/);
 assert.equal((htmlSource.match(/\.getDayDetails\(dateKey, requestedRevision\)/g) || []).length, 1);
@@ -882,6 +938,13 @@ assert.doesNotThrow(() => new vm.Script(browserScript, { filename: 'Index.html<s
 
 async function testClientBehavior() {
   const success = runClientScenario({ calendarResponse: makeCalendarPayload() });
+  const storedSuccess = JSON.parse(success.storageValues.get('danpro-employee-calendar:v1'));
+  assert.deepEqual(Object.keys(storedSuccess).sort(), ['days', 'levels', 'savedAt', 'updatedAt', 'version']);
+  assert.deepEqual(Object.keys(storedSuccess.days[0]).sort(), ['count', 'date', 'level', 'symbol']);
+  assert.doesNotMatch(
+    JSON.stringify(storedSuccess),
+    /customer|content|work|period|spreadsheet|revision|https?:/i,
+  );
   assert.equal(success.elements.get('source-link').hidden, false);
   assert.equal(
     success.elements.get('source-link').href,
@@ -905,6 +968,120 @@ async function testClientBehavior() {
     ]),
     [['◎', '余裕あり'], ['○', '対応可能'], ['△', 'やや混雑'], ['×', '混雑']],
   );
+
+  const cachedPayload = makeCalendarPayload();
+  const cachedUi = runClientScenario({
+    cachedCalendar: makeStoredCalendar(cachedPayload),
+    calendarResponse: makeCalendarPayload([makeCalendarDay('2026-09-08', 3)], 'revision-new'),
+    deferCalendar: true,
+  });
+  const cachedButton = cachedUi.elements
+    .get('calendar-grid')
+    .children
+    .find((element) => element.dataset.date === '2026-09-08');
+  assert.ok(cachedButton);
+  assert.equal(cachedButton.children[1].textContent, '○');
+  assert.match(cachedUi.elements.get('status-text').textContent, /^前回データを表示中/);
+  assert.equal(cachedUi.calls.calendar, 1);
+  assert.ok(
+    cachedUi.window.__danproCalendarTiming.cachedCalendarRenderedMs
+      < cachedUi.window.__danproCalendarTiming.getCalendarDataStartedMs,
+  );
+  assert.equal(cachedUi.pendingCalendars.length, 1);
+  cachedUi.advancePerformance(800);
+  cachedUi.pendingCalendars[0].resolve();
+  assert.ok(
+    cachedUi.window.__danproCalendarTiming.getCalendarDataCompletedMs
+      <= cachedUi.window.__danproCalendarTiming.latestCalendarRenderedMs,
+  );
+  assert.deepEqual(
+    {
+      html: cachedUi.window.__danproCalendarTiming.htmlDisplayStartedMs,
+      cached: cachedUi.window.__danproCalendarTiming.cachedCalendarRenderedMs,
+      request: cachedUi.window.__danproCalendarTiming.getCalendarDataStartedMs,
+      complete: cachedUi.window.__danproCalendarTiming.getCalendarDataCompletedMs,
+      latest: cachedUi.window.__danproCalendarTiming.latestCalendarRenderedMs,
+    },
+    { html: 0, cached: 0.5, request: 1, complete: 801.5, latest: 802 },
+  );
+  const latestCachedButton = cachedUi.elements
+    .get('calendar-grid')
+    .children
+    .find((element) => element.dataset.date === '2026-09-08');
+  assert.equal(latestCachedButton.children[1].textContent, '△');
+
+  const noCacheUi = runClientScenario({
+    calendarResponse: makeCalendarPayload(),
+    deferCalendar: true,
+  });
+  assert.equal(
+    noCacheUi.elements.get('calendar-grid').children.some((element) => element.dataset.date),
+    false,
+  );
+  assert.equal(noCacheUi.pendingCalendars.length, 1);
+  noCacheUi.advancePerformance(800);
+  noCacheUi.pendingCalendars[0].resolve();
+  assert.ok(noCacheUi.elements.get('calendar-grid').children
+    .some((element) => element.dataset.date === '2026-09-08'));
+  assert.deepEqual(
+    {
+      html: noCacheUi.window.__danproCalendarTiming.htmlDisplayStartedMs,
+      cached: noCacheUi.window.__danproCalendarTiming.cachedCalendarRenderedMs,
+      request: noCacheUi.window.__danproCalendarTiming.getCalendarDataStartedMs,
+      complete: noCacheUi.window.__danproCalendarTiming.getCalendarDataCompletedMs,
+      latest: noCacheUi.window.__danproCalendarTiming.latestCalendarRenderedMs,
+    },
+    { html: 0, cached: null, request: 0.5, complete: 801, latest: 801.5 },
+  );
+
+  const cachedDeniedUi = runClientScenario({
+    cachedCalendar: makeStoredCalendar(),
+    calendarResponse: { ok: false, error: { code: 'ACCESS_DENIED' } },
+  });
+  assert.equal(cachedDeniedUi.storageValues.has('danpro-employee-calendar:v1'), false);
+  assert.equal(
+    cachedDeniedUi.elements.get('calendar-grid').children.some((element) => element.dataset.date),
+    false,
+  );
+
+  const storageBlockedUi = runClientScenario({
+    calendarResponse: makeCalendarPayload(),
+    storageFailure: true,
+  });
+  assert.ok(storageBlockedUi.elements.get('calendar-grid').children
+    .some((element) => element.dataset.date === '2026-09-08'));
+
+  const expiredCalendar = makeStoredCalendar();
+  expiredCalendar.savedAt = Date.parse('2026-09-08T02:55:00.000Z');
+  const expiredUi = runClientScenario({
+    cachedCalendar: expiredCalendar,
+    calendarResponse: makeCalendarPayload(),
+    deferCalendar: true,
+  });
+  assert.equal(
+    expiredUi.elements.get('calendar-grid').children.some((element) => element.dataset.date),
+    false,
+  );
+  assert.equal(expiredUi.storageValues.has('danpro-employee-calendar:v1'), false);
+
+  const otherMonthResponse = makeCalendarPayload([makeCalendarDay('2025-12-15', 1)]);
+  const otherMonthUi = runClientScenario({
+    cachedCalendar: makeStoredCalendar(otherMonthResponse),
+    calendarResponse: otherMonthResponse,
+    deferCalendar: true,
+  });
+  assert.equal(otherMonthUi.elements.get('month-title').textContent, '2025年 12月');
+  otherMonthUi.pendingCalendars[0].resolve();
+  assert.equal(otherMonthUi.elements.get('month-title').textContent, '2025年 12月');
+
+  const switchedSheetUi = runClientScenario({
+    cachedCalendar: makeStoredCalendar(otherMonthResponse),
+    calendarResponse: makeCalendarPayload([makeCalendarDay('2027-02-01', 1)], 'revision-sheet-b'),
+    deferCalendar: true,
+  });
+  assert.equal(switchedSheetUi.elements.get('month-title').textContent, '2025年 12月');
+  switchedSheetUi.pendingCalendars[0].resolve();
+  assert.equal(switchedSheetUi.elements.get('month-title').textContent, '2027年 2月');
 
   const sundayStart = runClientScenario({
     calendarResponse: makeCalendarPayload([makeCalendarDay('2025-06-01', 1)]),
@@ -990,8 +1167,10 @@ async function testClientBehavior() {
   assert.equal(thresholdUi.intervals.length, 1);
   assert.equal(thresholdUi.intervals[0].milliseconds, 60 * 1000);
   assert.equal(thresholdUi.calls.calendar, 1);
+  assert.equal(thresholdUi.storageCalls.setItem, 1);
   thresholdUi.intervals[0].callback();
   assert.equal(thresholdUi.calls.calendar, 2);
+  assert.equal(thresholdUi.storageCalls.setItem, 2);
   thresholdUi.documentListeners.visibilitychange[0]();
   assert.equal(thresholdUi.calls.calendar, 3);
 
@@ -1191,7 +1370,7 @@ testClientBehavior().then(() => {
   console.log('PASS: detail cache hit performs zero Spreadsheet reads; cache miss bulk-loads safely');
   console.log('PASS: leftmost sheet switch rotates the sheetId-scoped cache generation');
   console.log('PASS: month/year rollover and invalid-date rejection');
-  console.log('PASS: no Spreadsheet write calls or browser persistence; user cache TTL is 75 seconds');
+  console.log('PASS: no Spreadsheet writes; localStorage keeps display-only fields; detail cache TTL is 75 seconds');
   console.log('PASS: safe ACCESS_DENIED / transient error envelopes without raw Google messages');
   console.log('PASS: leftmost valid visible schedule follows tab insertion, reorder, and rename');
   console.log('PASS: calendar, day details, and Spreadsheet gid share the same resolver');
@@ -1201,6 +1380,7 @@ testClientBehavior().then(() => {
   console.log('PASS: pending hover shows loading, then switches to fetched details');
   console.log('PASS: second hover and hover-followed-by-click reuse one detail request');
   console.log('PASS: unchanged 60-second refresh retains details; changed revision invalidates them');
+  console.log('PASS: cached/no-cache startup, sheet switch, other-month restore, and timing milestones');
   console.log('PASS: permission messages, PC hover, mobile tap, and modal-only detail errors');
 }).catch((error) => {
   console.error(error);

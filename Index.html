@@ -577,6 +577,8 @@
         const TIME_ZONE = 'Asia/Tokyo';
         const REFRESH_INTERVAL_MS = 60 * 1000;
         const HOVER_DELAY_MS = 250;
+        const CALENDAR_STORAGE_KEY = 'danpro-employee-calendar:v1';
+        const CALENDAR_STORAGE_TTL_MS = 24 * 60 * 60 * 1000;
         const ERROR_CODES = Object.freeze({
           accessDenied: 'ACCESS_DENIED',
           dataFetchFailed: 'DATA_FETCH_FAILED',
@@ -591,6 +593,18 @@
         const LEVEL_SYMBOLS = ['◎', '○', '△', '×'];
         const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
         const hoverCapable = window.matchMedia('(hover: hover) and (pointer: fine)');
+        const startupTimingOrigin = window.performance && typeof window.performance.now === 'function'
+          ? window.performance.now()
+          : 0;
+        const startupTiming = {
+          htmlDisplayStartedMs: 0,
+          cachedCalendarRenderedMs: null,
+          getCalendarDataStartedMs: null,
+          getCalendarDataCompletedMs: null,
+          latestCalendarRenderedMs: null,
+          serverTiming: null,
+        };
+        window.__danproCalendarTiming = startupTiming;
 
         const elements = {
           calendarWrap: document.getElementById('calendar-wrap'),
@@ -618,6 +632,7 @@
         let calendarData = new Map();
         let hasLoadedSuccessfully = false;
         let isLoading = false;
+        let showingCachedCalendar = false;
         let detailRevision = null;
         let detailGeneration = 0;
         let modalRequestToken = 0;
@@ -634,6 +649,127 @@
 
         function toDateKey(year, month, day) {
           return `${year}-${pad2(month)}-${pad2(day)}`;
+        }
+
+        function markStartupTiming(name) {
+          if (startupTiming[name] !== null) return;
+          const current = window.performance && typeof window.performance.now === 'function'
+            ? window.performance.now()
+            : startupTimingOrigin;
+          startupTiming[name] = Math.max(0, Math.round((current - startupTimingOrigin) * 10) / 10);
+        }
+
+        function isValidDateKey(value) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+          const [year, month, day] = value.split('-').map(Number);
+          const date = new Date(year, month - 1, day);
+          return date.getFullYear() === year
+            && date.getMonth() === month - 1
+            && date.getDate() === day;
+        }
+
+        function parseCachedCalendar(value) {
+          try {
+            const cached = JSON.parse(value);
+            const now = Date.now();
+            if (
+              !cached
+              || cached.version !== 1
+              || !Number.isFinite(cached.savedAt)
+              || cached.savedAt > now + 5 * 60 * 1000
+              || now - cached.savedAt > CALENDAR_STORAGE_TTL_MS
+              || !Array.isArray(cached.days)
+              || cached.days.length === 0
+              || cached.days.length > 800
+              || !Array.isArray(cached.levels)
+              || cached.levels.length !== 4
+              || typeof cached.updatedAt !== 'string'
+              || Number.isNaN(Date.parse(cached.updatedAt))
+            ) return null;
+
+            const daysAreSafe = cached.days.every((day) => (
+              day
+              && Object.keys(day).sort().join(',') === 'count,date,level,symbol'
+              && typeof day.date === 'string'
+              && isValidDateKey(day.date)
+              && Number.isInteger(day.count)
+              && day.count >= 0
+              && Number.isInteger(day.level)
+              && day.level >= 0
+              && day.level < LEVEL_SYMBOLS.length
+              && day.symbol === LEVEL_SYMBOLS[day.level]
+            ));
+            const levelsAreSafe = cached.levels.every((level, index) => (
+              level
+              && Object.keys(level).sort().join(',') === 'label,level,symbol'
+              && level.level === index
+              && level.symbol === LEVEL_SYMBOLS[index]
+              && typeof level.label === 'string'
+              && level.label.length <= 30
+            ));
+            if (!daysAreSafe || !levelsAreSafe) return null;
+            return {
+              days: cached.days,
+              levels: cached.levels,
+              updatedAt: cached.updatedAt,
+            };
+          } catch (error) {
+            return null;
+          }
+        }
+
+        function restoreCachedCalendar() {
+          let cached = null;
+          try {
+            cached = parseCachedCalendar(window.localStorage.getItem(CALENDAR_STORAGE_KEY));
+            if (!cached) window.localStorage.removeItem(CALENDAR_STORAGE_KEY);
+          } catch (error) {
+            return false;
+          }
+          if (!cached) return false;
+
+          chooseInitialMonth(cached.days);
+          calendarData = new Map(cached.days.map((day) => [day.date, day]));
+          hasLoadedSuccessfully = true;
+          showingCachedCalendar = true;
+          renderLegend(cached.levels);
+          renderCalendar();
+          elements.statusText.textContent = `前回データを表示中 · ${formatUpdatedAt(cached.updatedAt)}`;
+          markStartupTiming('cachedCalendarRenderedMs');
+          return true;
+        }
+
+        function clearCachedCalendar() {
+          try {
+            window.localStorage.removeItem(CALENDAR_STORAGE_KEY);
+          } catch (error) {
+            // Storage無効でも画面上の権限制御は継続します。
+          }
+        }
+
+        function saveCachedCalendar(data) {
+          try {
+            const days = data.days.map((day) => ({
+              date: day.date,
+              count: day.count,
+              level: day.level,
+              symbol: day.symbol,
+            }));
+            const levels = data.levels.map((level) => ({
+              level: level.level,
+              symbol: level.symbol,
+              label: level.label,
+            }));
+            window.localStorage.setItem(CALENDAR_STORAGE_KEY, JSON.stringify({
+              version: 1,
+              savedAt: Date.now(),
+              days,
+              levels,
+              updatedAt: data.updatedAt,
+            }));
+          } catch (error) {
+            // Storage無効・容量超過でも通常取得は継続します。
+          }
         }
 
         function getDatePartsInTimeZone(date, timeZone) {
@@ -754,7 +890,11 @@
           elements.calendarWrap.setAttribute('aria-busy', String(loading));
           elements.spinner.hidden = !loading;
           if (loading) {
-            elements.statusText.textContent = hasLoadedSuccessfully ? '更新中…' : '読み込み中…';
+            elements.statusText.textContent = showingCachedCalendar
+              ? '前回データを表示中（更新中…）'
+              : hasLoadedSuccessfully
+                ? '更新中…'
+                : '読み込み中…';
           }
         }
 
@@ -772,8 +912,8 @@
           }).format(date)}`;
         }
 
-        function chooseInitialMonth(days) {
-          if (hasLoadedSuccessfully || days.length === 0) return;
+        function chooseInitialMonth(days, replaceCachedMonth = false) {
+          if ((!replaceCachedMonth && hasLoadedSuccessfully) || days.length === 0) return;
           const currentPrefix = `${tokyoToday.year}-${pad2(tokyoToday.month)}-`;
           if (days.some((day) => day.date.startsWith(currentPrefix))) return;
 
@@ -828,6 +968,7 @@
         }
 
         function handleCalendarResponse(response) {
+          markStartupTiming('getCalendarDataCompletedMs');
           if (!response || response.ok !== true || !response.data) {
             handleCalendarError(getSafeErrorCode(response));
             return;
@@ -835,30 +976,48 @@
 
           const data = response.data;
           const days = Array.isArray(data.days) ? data.days : [];
+          const levels = Array.isArray(data.levels) ? data.levels : FALLBACK_LEVELS;
+          const wasShowingCachedCalendar = showingCachedCalendar;
           const nextDetailRevision = typeof data.detailRevision === 'string'
             ? data.detailRevision
             : null;
-          const detailRevisionChanged = detailRevision !== null
-            && detailRevision !== nextDetailRevision;
+          const detailRevisionChanged = wasShowingCachedCalendar
+            || (detailRevision !== null && detailRevision !== nextDetailRevision);
           detailRevision = nextDetailRevision;
+          showingCachedCalendar = false;
           if (detailRevisionChanged) invalidateDetailCache();
           else cancelHover();
-          chooseInitialMonth(days);
+          chooseInitialMonth(days, wasShowingCachedCalendar);
           calendarData = new Map(days.map((day) => [day.date, day]));
           hasLoadedSuccessfully = true;
           showSourceLink(data.spreadsheetUrl);
           elements.error.hidden = true;
           elements.error.textContent = '';
           elements.statusText.textContent = formatUpdatedAt(data.updatedAt);
-          renderLegend(Array.isArray(data.levels) ? data.levels : FALLBACK_LEVELS);
+          renderLegend(levels);
           renderCalendar();
+          saveCachedCalendar({ days, levels, updatedAt: data.updatedAt });
           setLoading(false);
+          startupTiming.serverTiming = data.serverTiming || null;
+          markStartupTiming('latestCalendarRenderedMs');
+          if (startupTiming.latestCalendarRenderedMs !== null) {
+            console.info('calendar startup timing', { ...startupTiming });
+          }
           if (detailRevisionChanged) refreshOpenDetails();
         }
 
         function handleCalendarError(code) {
           const accessDenied = code === ERROR_CODES.accessDenied;
-          if (accessDenied) hideSourceLink();
+          if (accessDenied) {
+            hideSourceLink();
+            clearCachedCalendar();
+            calendarData = new Map();
+            hasLoadedSuccessfully = false;
+            showingCachedCalendar = false;
+            cancelHover();
+            closeDetails();
+            renderCalendar();
+          }
           elements.error.textContent = accessDenied
             ? 'このページを表示する権限がありません。\nダンプロスケジュールへのアクセス権限を確認してください。'
             : 'データを取得できませんでした。しばらくしてから再度お試しください。';
@@ -878,6 +1037,7 @@
         function refreshCalendar() {
           if (isLoading) return;
           setLoading(true);
+          markStartupTiming('getCalendarDataStartedMs');
           google.script.run
             .withSuccessHandler(handleCalendarResponse)
             .withFailureHandler(handleCalendarFailure)
@@ -1171,7 +1331,7 @@
         window.addEventListener('scroll', cancelHover, { passive: true });
 
         renderLegend(FALLBACK_LEVELS);
-        renderCalendar();
+        if (!restoreCachedCalendar()) renderCalendar();
         refreshCalendar();
         window.setInterval(refreshCalendar, REFRESH_INTERVAL_MS);
       })();
