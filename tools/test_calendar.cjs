@@ -11,6 +11,7 @@ const vm = require('node:vm');
 const root = path.resolve(__dirname, '..');
 const serverSource = fs.readFileSync(path.join(root, 'コード.js'), 'utf8');
 const htmlSource = fs.readFileSync(path.join(root, 'Index.html'), 'utf8');
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'appsscript.json'), 'utf8'));
 const browserScript = htmlSource.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 function blankSheet(rows, columns) {
@@ -152,7 +153,7 @@ class MockSheet {
 class MockCache {
   constructor() {
     this.values = new Map();
-    this.metrics = { get: 0, put: 0, putAll: 0 };
+    this.metrics = { get: 0, getAll: 0, put: 0, putAll: 0 };
     this.failGet = false;
     this.failPut = false;
   }
@@ -161,6 +162,16 @@ class MockCache {
     this.metrics.get += 1;
     if (this.failGet) throw new Error('mock cache get failure');
     return this.values.has(key) ? this.values.get(key) : null;
+  }
+
+  getAll(keys) {
+    this.metrics.getAll += 1;
+    if (this.failGet) throw new Error('mock cache getAll failure');
+    const result = {};
+    keys.forEach((key) => {
+      if (this.values.has(key)) result[key] = this.values.get(key);
+    });
+    return result;
   }
 
   put(key, value) {
@@ -176,7 +187,7 @@ class MockCache {
   }
 
   resetMetrics() {
-    this.metrics = { get: 0, put: 0, putAll: 0 };
+    this.metrics = { get: 0, getAll: 0, put: 0, putAll: 0 };
   }
 
   clear() {
@@ -561,6 +572,57 @@ let openedSpreadsheetId = '';
 let spreadsheetError = null;
 const userCache = new MockCache();
 const scriptCache = new MockCache();
+let activeUserEmail = 'direct.user@example.com';
+let drivePermissionPages = [
+  [
+    { type: 'user', role: 'owner', emailAddress: 'owner@example.com' },
+    { type: 'user', role: 'reader', emailAddress: 'direct.user@example.com' },
+  ],
+  [
+    { type: 'group', role: 'reader', emailAddress: 'staff-group@example.com' },
+    {
+      type: 'domain',
+      role: 'reader',
+      domain: 'example.org',
+      allowFileDiscovery: true,
+    },
+    {
+      type: 'domain',
+      role: 'reader',
+      domain: 'link-only.example',
+      allowFileDiscovery: false,
+    },
+  ],
+];
+const groupDefinitions = new Map([
+  ['staff-group@example.com', {
+    users: [
+      { email: 'group.user@example.net', role: 'MEMBER' },
+      { email: 'banned.user@example.net', role: 'BANNED' },
+    ],
+    groups: ['nested-group@example.com'],
+  }],
+  ['nested-group@example.com', {
+    users: [{ email: 'nested.user@example.net', role: 'MANAGER' }],
+    groups: [],
+  }],
+]);
+
+function makeMockGroup(email) {
+  const definition = groupDefinitions.get(email);
+  if (!definition) throw new Error('group member list unavailable');
+  const users = definition.users.map((entry) => ({
+    getEmail: () => entry.email,
+    role: entry.role,
+  }));
+  return {
+    getEmail: () => email,
+    getUsers: () => users,
+    getRoles: (requestedUsers) => requestedUsers.map((user) => user.role),
+    getGroups: () => definition.groups.map(makeMockGroup),
+  };
+}
+
 const context = {
   console,
   Date,
@@ -571,6 +633,36 @@ const context = {
   Math,
   RegExp,
   JSON,
+  Session: {
+    getActiveUser() {
+      return { getEmail: () => activeUserEmail };
+    },
+  },
+  Drive: {
+    Permissions: {
+      list(id, options) {
+        assert.equal(id, '1KOHReFlDdmJvLWX16Qram6TSogWMXwW4ddWRI6uWjfY');
+        const pageIndex = options.pageToken ? Number(options.pageToken) : 0;
+        return {
+          permissions: drivePermissionPages[pageIndex] || [],
+          nextPageToken: pageIndex + 1 < drivePermissionPages.length
+            ? String(pageIndex + 1)
+            : undefined,
+        };
+      },
+    },
+  },
+  GroupsApp: {
+    Role: {
+      OWNER: 'OWNER',
+      MANAGER: 'MANAGER',
+      MEMBER: 'MEMBER',
+      INVITED: 'INVITED',
+      PENDING: 'PENDING',
+      BANNED: 'BANNED',
+    },
+    getGroupByEmail: makeMockGroup,
+  },
   SpreadsheetApp: {
     openById(id) {
       spreadsheetMetrics.openById += 1;
@@ -612,6 +704,42 @@ vm.runInContext(serverSource, context, { filename: 'コード.js' });
 
 userCache.clear();
 scriptCache.clear();
+resetSpreadsheetMetrics();
+const noAccessCacheResponse = context.getCalendarData();
+assert.deepEqual(
+  JSON.parse(JSON.stringify(noAccessCacheResponse)),
+  { ok: false, error: { code: 'ACCESS_DENIED' } },
+);
+assert.equal(spreadsheetMetrics.openById, 0);
+assert.equal(scriptCache.metrics.getAll, 1);
+
+scriptCache.clear();
+resetSpreadsheetMetrics();
+const initialTriggerRefresh = context.refreshCalendarAggregateCache();
+assert.equal(initialTriggerRefresh.ok, true);
+assert.equal(initialTriggerRefresh.data.allowedAccountCount, 4);
+assert.equal(initialTriggerRefresh.data.domainPermissionCount, 1);
+assert.equal(initialTriggerRefresh.data.groupPermissionCount, 1);
+assert.equal(scriptCache.metrics.put, 2);
+const accessPolicyPayload = JSON.parse(scriptCache.values.get('employee-access:v1'));
+assert.deepEqual(
+  Object.keys(accessPolicyPayload).sort(),
+  ['allowAnyAuthenticated', 'allowedDomains', 'allowedEmailHashes', 'generatedAt', 'version'],
+);
+assert.deepEqual(Array.from(accessPolicyPayload.allowedDomains), ['example.org']);
+assert.equal(accessPolicyPayload.allowedEmailHashes.length, 4);
+assert.ok(accessPolicyPayload.allowedEmailHashes.includes(context.hashEmail_('group.user@example.net')));
+assert.ok(accessPolicyPayload.allowedEmailHashes.includes(context.hashEmail_('nested.user@example.net')));
+assert.equal(
+  accessPolicyPayload.allowedEmailHashes.includes(context.hashEmail_('banned.user@example.net')),
+  false,
+);
+assert.doesNotMatch(
+  JSON.stringify(accessPolicyPayload),
+  /owner@|direct\.user|group\.user|nested\.user|banned\.user|staff-group/i,
+);
+scriptCache.values.delete('calendar-aggregate:v1');
+scriptCache.resetMetrics();
 resetSpreadsheetMetrics();
 const calendarResponse = context.getCalendarData();
 assert.equal(calendarResponse.ok, true);
@@ -681,7 +809,7 @@ assert.equal(triggerRefresh.data.dayCount, 3);
 assert.equal(userCache.metrics.get, 0);
 assert.equal(userCache.metrics.put, 0);
 assert.equal(userCache.metrics.putAll, 0);
-assert.equal(scriptCache.metrics.put, 1);
+assert.equal(scriptCache.metrics.put, 2);
 assert.deepEqual(copySpreadsheetMetrics(), {
   openById: 1,
   getRange: 3,
@@ -699,15 +827,18 @@ assert.equal(unchangedCalendar.serverTiming.cacheHit, true);
 assert.ok(unchangedCalendar.serverTiming.permissionCheckCompletedMs !== null);
 assert.ok(unchangedCalendar.serverTiming.serverCacheLookupCompletedMs !== null);
 assert.equal(unchangedCalendar.serverTiming.spreadsheetFetchCompletedMs, null);
+assert.equal(unchangedCalendar.serverTiming.spreadsheetOpenMs, 0);
+assert.equal(unchangedCalendar.serverTiming.sheetValueReadCalls, 0);
+assert.equal(unchangedCalendar.serverTiming.mergedRangeReadCalls, 0);
 assert.deepEqual(copySpreadsheetMetrics(), {
-  openById: 1,
+  openById: 0,
   getRange: 0,
   getValues: 0,
   getDisplayValues: 0,
   getMergedRanges: 0,
   getDisplayValue: 0,
 });
-assert.equal(scriptCache.metrics.get, 1);
+assert.equal(scriptCache.metrics.getAll, 1);
 const originalCustomer = targetSheet.values[2][4];
 targetSheet.values[2][4] = '顧客B';
 assert.equal(context.refreshCalendarAggregateCache().ok, true);
@@ -733,7 +864,8 @@ assert.equal(staleAfterFailedRefresh.data.serverTiming.cacheHit, false);
 assert.ok(staleAfterFailedRefresh.data.serverTiming.spreadsheetFetchCompletedMs !== null);
 assert.ok(spreadsheetMetrics.getDisplayValues > 0);
 
-scriptCache.clear();
+scriptCache.values.delete('calendar-aggregate:v1');
+scriptCache.resetMetrics();
 scriptCache.failPut = true;
 resetSpreadsheetMetrics();
 const cacheWriteFailureFallback = context.getCalendarData();
@@ -741,7 +873,7 @@ assert.equal(cacheWriteFailureFallback.ok, true);
 assert.equal(cacheWriteFailureFallback.data.serverTiming.cacheHit, false);
 assert.equal(scriptCache.values.has('calendar-aggregate:v1'), false);
 assert.ok(spreadsheetMetrics.getDisplayValues > 0);
-scriptCache.clear();
+scriptCache.failPut = false;
 
 userCache.clear();
 resetSpreadsheetMetrics();
@@ -802,7 +934,7 @@ spreadsheetSheets = [targetSheet, futureDatedRightSheet];
 assert.equal(context.resolveCurrentScheduleSheet_().sheet.getSheetId(), 1730965450);
 
 spreadsheetSheets = [newestLeftSheet, targetSheet];
-scriptCache.clear();
+scriptCache.values.delete('calendar-aggregate:v1');
 const activeCacheBeforeSheetSwitch = JSON.parse(
   userCache.values.get('day-details:active:v1'),
 );
@@ -825,14 +957,14 @@ assert.equal(newestDetails.data.items[0].work, '新しい左端タブの作業')
 assert.deepEqual(copySpreadsheetMetrics(), metricsBeforeNewestDetails);
 
 spreadsheetSheets = [descriptionSheet, hiddenValidSheet];
-scriptCache.clear();
+scriptCache.values.delete('calendar-aggregate:v1');
 assert.deepEqual(
   JSON.parse(JSON.stringify(context.getCalendarData())),
   { ok: false, error: { code: 'DATA_FETCH_FAILED' } },
 );
 
 spreadsheetSheets = [descriptionSheet, targetSheet];
-scriptCache.clear();
+scriptCache.values.delete('calendar-aggregate:v1');
 assert.equal(context.getCalendarData().ok, true);
 
 const newYearDetailsResponse = context.getDayDetails('2026-01-01');
@@ -896,7 +1028,7 @@ for (let row = 2; row <= 5; row += 1) {
   mixedValues[row][column] = work;
 });
 spreadsheetSheets = [new MockSheet(5005, mixedValues, { name: '混在日' })];
-scriptCache.clear();
+scriptCache.values.delete('calendar-aggregate:v1');
 const mixedCalendar = context.getCalendarData().data;
 assert.deepEqual(
   Array.from(mixedCalendar.days, (day) => ({ ...day })),
@@ -906,7 +1038,7 @@ spreadsheetSheets = [descriptionSheet, targetSheet];
 
 const mergedDetailsSheet = makeMergedDetailsSheet();
 spreadsheetSheets = [mergedDetailsSheet];
-scriptCache.clear();
+scriptCache.values.delete('calendar-aggregate:v1');
 assert.equal(context.getCalendarData().ok, true);
 const metricsBeforeMergedDetailsHit = copySpreadsheetMetrics();
 const mergedDetails = context.getDayDetails('2026-09-10').data;
@@ -929,7 +1061,7 @@ assert.equal(context.normalizePeriod_('ＰＭ'), 'PM');
 assert.equal(context.normalizePeriod_(''), '');
 assert.equal(context.normalizePeriod_('不明'), '');
 spreadsheetSheets = [descriptionSheet, targetSheet];
-scriptCache.clear();
+scriptCache.values.delete('calendar-aggregate:v1');
 assert.equal(context.getCalendarData().ok, true);
 
 assert.deepEqual(
@@ -944,15 +1076,15 @@ assert.deepEqual(
 userCache.clear();
 assert.equal(scriptCache.values.has('calendar-aggregate:v1'), true);
 scriptCache.resetMetrics();
-spreadsheetError = new Error(
-  'You do not have permission to access the requested document. Sensitive Google details.',
-);
+resetSpreadsheetMetrics();
+activeUserEmail = 'not.allowed@example.net';
 const calendarDenied = context.getCalendarData();
 assert.deepEqual(
   JSON.parse(JSON.stringify(calendarDenied)),
   { ok: false, error: { code: 'ACCESS_DENIED' } },
 );
-assert.equal(scriptCache.metrics.get, 0);
+assert.equal(spreadsheetMetrics.openById, 0);
+assert.equal(scriptCache.metrics.getAll, 1);
 assert.doesNotMatch(JSON.stringify(calendarDenied), /permission|Sensitive|Google details/i);
 const detailDenied = context.getDayDetails('2026-01-01');
 assert.deepEqual(
@@ -961,6 +1093,112 @@ assert.deepEqual(
 );
 assert.doesNotMatch(JSON.stringify(detailDenied), /permission|Sensitive|Google details/i);
 
+activeUserEmail = '';
+resetSpreadsheetMetrics();
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.getCalendarData())),
+  { ok: false, error: { code: 'ACCESS_DENIED' } },
+);
+assert.equal(spreadsheetMetrics.openById, 0);
+
+activeUserEmail = 'direct.user@example.com';
+scriptCache.values.delete('employee-access:v1');
+resetSpreadsheetMetrics();
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.getCalendarData())),
+  { ok: false, error: { code: 'ACCESS_DENIED' } },
+);
+assert.equal(spreadsheetMetrics.openById, 0);
+
+scriptCache.values.set('employee-access:v1', '{broken-json');
+resetSpreadsheetMetrics();
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.getCalendarData())),
+  { ok: false, error: { code: 'ACCESS_DENIED' } },
+);
+assert.equal(spreadsheetMetrics.openById, 0);
+
+assert.equal(context.refreshCalendarAggregateCache().ok, true);
+const expiredAccessPolicy = JSON.parse(scriptCache.values.get('employee-access:v1'));
+expiredAccessPolicy.generatedAt = Date.now() - (65 * 1000) - 1;
+scriptCache.values.set('employee-access:v1', JSON.stringify(expiredAccessPolicy));
+resetSpreadsheetMetrics();
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.getCalendarData())),
+  { ok: false, error: { code: 'ACCESS_DENIED' } },
+);
+assert.equal(spreadsheetMetrics.openById, 0);
+
+assert.equal(context.refreshCalendarAggregateCache().ok, true);
+activeUserEmail = 'group.user@example.net';
+resetSpreadsheetMetrics();
+assert.equal(context.getCalendarData().ok, true);
+assert.equal(spreadsheetMetrics.openById, 0);
+activeUserEmail = 'domain.user@example.org';
+resetSpreadsheetMetrics();
+assert.equal(context.getCalendarData().ok, true);
+assert.equal(spreadsheetMetrics.openById, 0);
+activeUserEmail = 'link.user@link-only.example';
+resetSpreadsheetMetrics();
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.getCalendarData())),
+  { ok: false, error: { code: 'ACCESS_DENIED' } },
+);
+assert.equal(spreadsheetMetrics.openById, 0);
+
+const groupUsersBeforeRemoval = groupDefinitions.get('staff-group@example.com').users;
+groupDefinitions.get('staff-group@example.com').users = groupUsersBeforeRemoval.filter((entry) => (
+  entry.email !== 'group.user@example.net'
+));
+assert.equal(context.refreshCalendarAggregateCache().ok, true);
+activeUserEmail = 'group.user@example.net';
+resetSpreadsheetMetrics();
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.getCalendarData())),
+  { ok: false, error: { code: 'ACCESS_DENIED' } },
+);
+assert.equal(spreadsheetMetrics.openById, 0);
+groupDefinitions.get('staff-group@example.com').users = groupUsersBeforeRemoval;
+activeUserEmail = 'direct.user@example.com';
+assert.equal(context.refreshCalendarAggregateCache().ok, true);
+
+activeUserEmail = 'direct.user@example.com';
+const validPolicyBeforeGroupFailure = scriptCache.values.get('employee-access:v1');
+const staffGroupDefinition = groupDefinitions.get('staff-group@example.com');
+groupDefinitions.delete('staff-group@example.com');
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.refreshCalendarAggregateCache())),
+  { ok: false, error: { code: 'DATA_FETCH_FAILED' } },
+);
+assert.equal(scriptCache.values.get('employee-access:v1'), validPolicyBeforeGroupFailure);
+const expiredPolicyAfterFailure = JSON.parse(validPolicyBeforeGroupFailure);
+expiredPolicyAfterFailure.generatedAt = Date.now() - (65 * 1000) - 1;
+scriptCache.values.set('employee-access:v1', JSON.stringify(expiredPolicyAfterFailure));
+resetSpreadsheetMetrics();
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.getCalendarData())),
+  { ok: false, error: { code: 'ACCESS_DENIED' } },
+);
+assert.equal(spreadsheetMetrics.openById, 0);
+groupDefinitions.set('staff-group@example.com', staffGroupDefinition);
+assert.equal(context.refreshCalendarAggregateCache().ok, true);
+
+activeUserEmail = 'direct.user@example.com';
+const originalDrivePermissionPages = drivePermissionPages;
+drivePermissionPages = originalDrivePermissionPages.map((page) => page.filter((permission) => (
+  permission.emailAddress !== 'direct.user@example.com'
+)));
+assert.equal(context.refreshCalendarAggregateCache().ok, true);
+resetSpreadsheetMetrics();
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.getCalendarData())),
+  { ok: false, error: { code: 'ACCESS_DENIED' } },
+);
+assert.equal(spreadsheetMetrics.openById, 0);
+drivePermissionPages = originalDrivePermissionPages;
+assert.equal(context.refreshCalendarAggregateCache().ok, true);
+
+scriptCache.values.delete('calendar-aggregate:v1');
 spreadsheetError = new Error(
   'Service invoked too many times: Spreadsheet. Internal transient details.',
 );
@@ -970,7 +1208,6 @@ assert.deepEqual(
   { ok: false, error: { code: 'DATA_FETCH_FAILED' } },
 );
 assert.doesNotMatch(JSON.stringify(transientFailure), /Service invoked|Internal transient/i);
-assert.equal(scriptCache.metrics.get, 0);
 spreadsheetError = null;
 
 const parsed = context.parseDateHeaders_(
@@ -997,10 +1234,16 @@ assert.match(serverSource, /COUNTED_WORK_TYPES\.includes\(trimmed_\(value\)\)/);
 assert.match(serverSource, /getMergedRanges\(\)/);
 assert.doesNotMatch(serverSource, /isPm_|isAm_/);
 assert.match(serverSource, /CacheService\.getUserCache\(\)/);
-assert.equal((serverSource.match(/CacheService\.getScriptCache\(\)/g) || []).length, 2);
+assert.equal((serverSource.match(/CacheService\.getScriptCache\(\)/g) || []).length, 4);
 assert.doesNotMatch(serverSource, /getDocumentCache\(\)|PropertiesService|ScriptApp\.newTrigger/);
 assert.match(serverSource, /function refreshCalendarAggregateCache\(\)/);
-assert.match(serverSource, /verifySpreadsheetAccess_\(timing\)[\s\S]*?getCachedCalendarAggregate_\(timing\)/);
+assert.match(serverSource, /Session\.getActiveUser\(\)\.getEmail\(\)/);
+assert.match(serverSource, /Drive\.Permissions\.list\(/);
+assert.match(serverSource, /GroupsApp\.getGroupByEmail\(/);
+assert.match(serverSource, /getAuthorizedCalendarAggregate_\(timing\)[\s\S]*?if \(cached\)/);
+assert.doesNotMatch(serverSource, /function verifySpreadsheetAccess_/);
+assert.equal(manifest.dependencies.enabledAdvancedServices[0].serviceId, 'drive');
+assert.equal(manifest.dependencies.enabledAdvancedServices[0].version, 'v3');
 assert.match(serverSource, /detailCacheTtlSeconds:\s*75/);
 assert.match(serverSource, /generation = `\$\{sheetId\}:/);
 assert.match(serverSource, /Utilities\.DigestAlgorithm\.SHA_256/);
@@ -1534,8 +1777,11 @@ testClientBehavior().then(() => {
   console.log('PASS: second hover and hover-followed-by-click reuse one detail request');
   console.log('PASS: unchanged 60-second refresh retains details; changed revision invalidates them');
   console.log('PASS: cached/no-cache startup, sheet switch, other-month restore, and timing milestones');
-  console.log('PASS: precomputed server cache hit uses permission check but zero sheet Range reads');
+  console.log('PASS: precomputed server cache hit uses cached identity policy with zero Spreadsheet opens/range reads');
   console.log('PASS: absent/stale/write-failed server cache falls back to normal Spreadsheet aggregation');
+  console.log('PASS: direct, nested-group, and domain permissions authorize without request-time Drive access');
+  console.log('PASS: missing email, denied user, missing/corrupt/expired access cache all fail closed');
+  console.log('PASS: permission removal refresh and failed group refresh expiration prevent stale access');
   console.log('PASS: denied users cannot read the shared server cache; trigger stores no customer details');
   console.log('PASS: permission messages, PC hover, mobile tap, and modal-only detail errors');
 }).catch((error) => {

@@ -1011,6 +1011,7 @@
           if (accessDenied) {
             hideSourceLink();
             clearCachedCalendar();
+            invalidateDetailCache();
             calendarData = new Map();
             hasLoadedSuccessfully = false;
             showingCachedCalendar = false;

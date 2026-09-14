@@ -16,6 +16,12 @@ const CALENDAR_CONFIG = Object.freeze({
   calendarCacheTtlSeconds: 180,
   calendarCacheMaxAgeMs: 2 * 60 * 1000,
   calendarCacheMaxValueChars: 90000,
+  accessCacheKey: 'employee-access:v1',
+  accessCacheTtlSeconds: 75,
+  accessCacheMaxAgeMs: 65 * 1000,
+  accessCacheMaxValueChars: 90000,
+  maxAccessAccountCount: 1500,
+  maxAccessGroupCount: 100,
   levels: Object.freeze([
     Object.freeze({ level: 0, max: 0, symbol: '◎', label: '余裕あり' }),
     Object.freeze({ level: 1, max: 2, symbol: '○', label: '対応可能' }),
@@ -45,8 +51,8 @@ function doGet() {
 }
 
 /**
- * Spreadsheetへのアクセス権を軽量確認してから、事前集計済み表示キャッシュを返します。
- * キャッシュミス・期限切れ時だけ通常のSpreadsheet集計へフォールバックします。
+ * アクセス中ユーザーを事前生成済み権限キャッシュで確認してから、表示キャッシュを返します。
+ * 権限キャッシュが利用できない場合はSpreadsheetを開かず、安全側で拒否します。
  *
  * @return {{ok: boolean, data: Object}|{ok: false, error: {code: string}}}
  */
@@ -66,13 +72,13 @@ function getCalendarData() {
  */
 function getCalendarData_() {
   const timing = createCalendarTiming_();
-  const spreadsheet = verifySpreadsheetAccess_(timing);
-  const cached = getCachedCalendarAggregate_(timing);
+  const cached = getAuthorizedCalendarAggregate_(timing);
   if (cached) {
     const result = buildCachedCalendarResponse_(cached);
     return attachCalendarTiming_(result, timing, true);
   }
 
+  const spreadsheet = openSpreadsheet_(timing);
   const result = buildFreshCalendarData_(spreadsheet, timing, true);
   timing.spreadsheetFetchCompletedMs = Date.now() - timing.startedAt;
   cacheCalendarAggregate_(result);
@@ -82,12 +88,15 @@ function getCalendarData_() {
 
 /**
  * 1分程度の時間主導トリガーから呼び出す事前集計更新関数です。
- * トリガーの新規作成は行わず、既存Spreadsheetを読み取って表示専用キャッシュだけを更新します。
+ * Spreadsheet共有権限と表示専用カレンダーを更新します。トリガー自体は作成しません。
  */
 function refreshCalendarAggregateCache() {
   try {
     const timing = createCalendarTiming_();
-    const spreadsheet = verifySpreadsheetAccess_(timing);
+    const spreadsheet = openSpreadsheet_(timing);
+    const accessPolicyResult = buildSpreadsheetAccessPolicy_();
+    cacheSpreadsheetAccessPolicy_(accessPolicyResult.policy);
+    console.info(`access policy refreshed ${JSON.stringify(accessPolicyResult.stats)}`);
     const result = buildFreshCalendarData_(spreadsheet, timing, false);
     timing.spreadsheetFetchCompletedMs = Date.now() - timing.startedAt;
     cacheCalendarAggregate_(result);
@@ -98,6 +107,9 @@ function refreshCalendarAggregateCache() {
       data: {
         updatedAt: result.updatedAt,
         dayCount: result.days.length,
+        allowedAccountCount: accessPolicyResult.stats.allowedAccountCount,
+        domainPermissionCount: accessPolicyResult.stats.domainPermissionCount,
+        groupPermissionCount: accessPolicyResult.stats.groupPermissionCount,
         serverTiming: result.serverTiming,
       },
     };
@@ -110,6 +122,8 @@ function createCalendarTiming_() {
   return {
     startedAt: Date.now(),
     permissionCheckCompletedMs: null,
+    activeUserLookupMs: 0,
+    accessCacheLookupMs: 0,
     serverCacheLookupCompletedMs: null,
     spreadsheetFetchCompletedMs: null,
     cacheHit: false,
@@ -124,12 +138,11 @@ function createCalendarTiming_() {
   };
 }
 
-function verifySpreadsheetAccess_(timing) {
+function openSpreadsheet_(timing) {
   const openStartedAt = Date.now();
   const spreadsheet = SpreadsheetApp.openById(CALENDAR_CONFIG.spreadsheetId);
   spreadsheet.getId();
   timing.spreadsheetOpenMs += Date.now() - openStartedAt;
-  timing.permissionCheckCompletedMs = Date.now() - timing.startedAt;
   return spreadsheet;
 }
 
@@ -202,10 +215,42 @@ function buildCachedCalendarResponse_(cached) {
   };
 }
 
-function getCachedCalendarAggregate_(timing) {
+function getAuthorizedCalendarAggregate_(timing) {
+  const identityStartedAt = Date.now();
+  const email = normalizeEmail_(Session.getActiveUser().getEmail());
+  timing.activeUserLookupMs = Date.now() - identityStartedAt;
+  if (!email) throw new Error('access denied: active user unavailable');
+
+  let cachedValues;
+  const accessCacheStartedAt = Date.now();
   try {
     const cache = CacheService.getScriptCache();
-    const serialized = cache.get(CALENDAR_CONFIG.calendarCacheKey);
+    cachedValues = cache.getAll([
+      CALENDAR_CONFIG.accessCacheKey,
+      CALENDAR_CONFIG.calendarCacheKey,
+    ]);
+  } catch (error) {
+    throw new Error('access denied: access cache unavailable');
+  }
+  timing.accessCacheLookupMs = Date.now() - accessCacheStartedAt;
+
+  const accessPolicy = parseCachedAccessPolicy_(
+    cachedValues && cachedValues[CALENDAR_CONFIG.accessCacheKey],
+  );
+  if (!accessPolicy || !isEmailAllowedByPolicy_(email, accessPolicy)) {
+    throw new Error('access denied: user is not allowed');
+  }
+  timing.permissionCheckCompletedMs = Date.now() - timing.startedAt;
+
+  const aggregate = parseCachedCalendarAggregate_(
+    cachedValues && cachedValues[CALENDAR_CONFIG.calendarCacheKey],
+  );
+  timing.serverCacheLookupCompletedMs = Date.now() - timing.startedAt;
+  return aggregate;
+}
+
+function parseCachedCalendarAggregate_(serialized) {
+  try {
     if (!serialized) return null;
     const cached = JSON.parse(serialized);
     if (!isValidCalendarAggregate_(cached)) return null;
@@ -213,8 +258,6 @@ function getCachedCalendarAggregate_(timing) {
     return cached;
   } catch (error) {
     return null;
-  } finally {
-    timing.serverCacheLookupCompletedMs = Date.now() - timing.startedAt;
   }
 }
 
@@ -292,6 +335,216 @@ function isValidCalendarAggregate_(cached) {
   });
 }
 
+function parseCachedAccessPolicy_(serialized) {
+  try {
+    if (!serialized) return null;
+    const policy = JSON.parse(serialized);
+    if (!isValidAccessPolicy_(policy)) return null;
+    if (Date.now() - policy.generatedAt > CALENDAR_CONFIG.accessCacheMaxAgeMs) return null;
+    return policy;
+  } catch (error) {
+    return null;
+  }
+}
+
+function isValidAccessPolicy_(policy) {
+  if (
+    !policy
+    || policy.version !== 1
+    || !Number.isFinite(policy.generatedAt)
+    || policy.generatedAt > Date.now() + 60 * 1000
+    || !Array.isArray(policy.allowedEmailHashes)
+    || policy.allowedEmailHashes.length > CALENDAR_CONFIG.maxAccessAccountCount
+    || !Array.isArray(policy.allowedDomains)
+    || policy.allowedDomains.length > 100
+    || typeof policy.allowAnyAuthenticated !== 'boolean'
+  ) return false;
+
+  return policy.allowedEmailHashes.every((value) => (
+    typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value)
+  )) && policy.allowedDomains.every((value) => (
+    typeof value === 'string'
+    && value === value.toLowerCase()
+    && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(value)
+  ));
+}
+
+function isEmailAllowedByPolicy_(email, policy) {
+  if (policy.allowAnyAuthenticated) return true;
+  if (policy.allowedEmailHashes.includes(hashEmail_(email))) return true;
+  const domain = email.slice(email.lastIndexOf('@') + 1);
+  return policy.allowedDomains.includes(domain);
+}
+
+function normalizeEmail_(value) {
+  const email = String(value == null ? '' : value).trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
+}
+
+function hashEmail_(email) {
+  const digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    email,
+    Utilities.Charset.UTF_8,
+  );
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, '');
+}
+
+function buildSpreadsheetAccessPolicy_() {
+  const permissions = listSpreadsheetPermissions_();
+  const allowedEmails = new Set();
+  const allowedDomains = new Set();
+  const visitedGroups = new Set();
+  let allowAnyAuthenticated = false;
+  let groupPermissionCount = 0;
+  let domainPermissionCount = 0;
+
+  permissions.forEach((permission) => {
+    if (!isReadableDrivePermission_(permission)) return;
+    if (permission.type === 'user') {
+      addAllowedEmail_(allowedEmails, permission.emailAddress);
+      return;
+    }
+    if (permission.type === 'group') {
+      const groupEmail = normalizeEmail_(permission.emailAddress);
+      if (!groupEmail) throw new Error('invalid Google Group permission');
+      groupPermissionCount += 1;
+      addGoogleGroupMembers_(groupEmail, allowedEmails, visitedGroups);
+      return;
+    }
+    if (permission.type === 'domain') {
+      if (permission.allowFileDiscovery !== true) return;
+      const domain = normalizeDomain_(permission.domain);
+      if (!domain) throw new Error('invalid domain permission');
+      allowedDomains.add(domain);
+      domainPermissionCount += 1;
+      return;
+    }
+    if (permission.type === 'anyone' && permission.allowFileDiscovery === true) {
+      allowAnyAuthenticated = true;
+    }
+  });
+
+  const policy = {
+    version: 1,
+    generatedAt: Date.now(),
+    allowedEmailHashes: Array.from(allowedEmails, hashEmail_).sort(),
+    allowedDomains: Array.from(allowedDomains).sort(),
+    allowAnyAuthenticated,
+  };
+  if (!isValidAccessPolicy_(policy)) throw new Error('access policy validation failed');
+  return {
+    policy,
+    stats: {
+      allowedAccountCount: policy.allowedEmailHashes.length,
+      domainPermissionCount,
+      groupPermissionCount,
+    },
+  };
+}
+
+function listSpreadsheetPermissions_() {
+  const permissions = [];
+  let pageToken;
+  do {
+    const options = {
+      fields: 'nextPageToken,permissions(type,role,emailAddress,domain,allowFileDiscovery,deleted,expirationTime)',
+      pageSize: 100,
+      supportsAllDrives: true,
+    };
+    if (pageToken) options.pageToken = pageToken;
+    const page = Drive.Permissions.list(CALENDAR_CONFIG.spreadsheetId, options);
+    (page.permissions || []).forEach((permission) => permissions.push(permission));
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return permissions;
+}
+
+function isReadableDrivePermission_(permission) {
+  if (!permission || permission.deleted) return false;
+  if (permission.expirationTime) {
+    const expiration = Date.parse(permission.expirationTime);
+    if (!Number.isFinite(expiration)) throw new Error('invalid permission expiration');
+    if (expiration <= Date.now()) return false;
+  }
+  return [
+    'owner',
+    'organizer',
+    'fileOrganizer',
+    'writer',
+    'commenter',
+    'reader',
+  ].includes(permission.role);
+}
+
+function addGoogleGroupMembers_(groupEmail, allowedEmails, visitedGroups) {
+  if (visitedGroups.has(groupEmail)) return;
+  if (visitedGroups.size >= CALENDAR_CONFIG.maxAccessGroupCount) {
+    throw new Error('Google Group limit exceeded');
+  }
+  visitedGroups.add(groupEmail);
+
+  const group = GroupsApp.getGroupByEmail(groupEmail);
+  const users = group.getUsers();
+  const roles = group.getRoles(users);
+  users.forEach((user, index) => {
+    if (!isActiveGoogleGroupRole_(roles[index])) return;
+    addAllowedEmail_(allowedEmails, user.getEmail());
+  });
+  group.getGroups().forEach((childGroup) => {
+    const childEmail = normalizeEmail_(childGroup.getEmail());
+    if (!childEmail) throw new Error('invalid nested Google Group');
+    addGoogleGroupMembers_(childEmail, allowedEmails, visitedGroups);
+  });
+}
+
+function isActiveGoogleGroupRole_(role) {
+  return role === GroupsApp.Role.OWNER
+    || role === GroupsApp.Role.MANAGER
+    || role === GroupsApp.Role.MEMBER;
+}
+
+function addAllowedEmail_(allowedEmails, value) {
+  const email = normalizeEmail_(value);
+  if (!email) return;
+  allowedEmails.add(email);
+  if (allowedEmails.size > CALENDAR_CONFIG.maxAccessAccountCount) {
+    throw new Error('access account limit exceeded');
+  }
+}
+
+function normalizeDomain_(value) {
+  const domain = String(value == null ? '' : value).trim().toLowerCase();
+  return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain) ? domain : '';
+}
+
+function cacheSpreadsheetAccessPolicy_(policy) {
+  const serialized = JSON.stringify(policy);
+  if (serialized.length > CALENDAR_CONFIG.accessCacheMaxValueChars) {
+    throw new Error('access cache size exceeded');
+  }
+  CacheService.getScriptCache().put(
+    CALENDAR_CONFIG.accessCacheKey,
+    serialized,
+    CALENDAR_CONFIG.accessCacheTtlSeconds,
+  );
+}
+
+function verifyCachedUserAccess_() {
+  const email = normalizeEmail_(Session.getActiveUser().getEmail());
+  if (!email) throw new Error('access denied: active user unavailable');
+  let serialized;
+  try {
+    serialized = CacheService.getScriptCache().get(CALENDAR_CONFIG.accessCacheKey);
+  } catch (error) {
+    throw new Error('access denied: access cache unavailable');
+  }
+  const policy = parseCachedAccessPolicy_(serialized);
+  if (!policy || !isEmailAllowedByPolicy_(email, policy)) {
+    throw new Error('access denied: user is not allowed');
+  }
+}
+
 /**
  * 指定された1日分だけの案件詳細を読み取ります。
  * 返す項目は客先名、内容、当日の作業内容、AM/PMに限定します。
@@ -316,6 +569,7 @@ function getDayDetails(dateKey, expectedRevision) {
  *   updatedAt: string, revision: string}}
  */
 function getDayDetails_(dateKey, expectedRevision) {
+  verifyCachedUserAccess_();
   const normalizedDateKey = normalizeDateKey_(dateKey);
   if (!normalizedDateKey) {
     throw new Error('日付はyyyy-MM-dd形式で指定してください。');

@@ -39,9 +39,13 @@ Spreadsheetから読み取った詳細表示対象データとsheetIdをSHA-256�
 
 サーバーは候補シートごとにヘッダー行から最終行までを1つのRangeで一括取得し、その配列を最新シート判定、集計、詳細生成、detailRevision生成で再利用します。`getCalendarData()`の応答にはSpreadsheetオープン、Range読み取り、最新シート判定、集計、revision、詳細キャッシュ保存の各所要時間を`serverTiming`として含め、ブラウザー側は初期表示の各時点を`window.__danproCalendarTiming`とコンソールへ記録します。この計測値と顧客情報はlocalStorageへ保存しません。
 
-初回ブラウザー向けには、Apps ScriptのScript Cacheへ表示専用の事前集計を最大3分保存します。内容は`days`（date / count / level / symbol）、`levels`、更新時刻、対象sheetId、detailRevisionだけで、顧客名、商品名、工程詳細、period、Spreadsheet URLは含めません。`getCalendarData()`は毎回、アクセス中ユーザーが対象Spreadsheetを開けることを最小限のアクセスで確認してからScript Cacheを参照します。キャッシュがない、2分より古い、壊れている、またはCache Serviceが失敗した場合は、通常のSpreadsheet一括取得と集計へフォールバックします。
+初回ブラウザー向けには、Apps ScriptのScript Cacheへ表示専用の事前集計を最大3分保存します。内容は`days`（date / count / level / symbol）、`levels`、更新時刻、対象sheetId、detailRevisionだけで、顧客名、商品名、工程詳細、period、Spreadsheet URLは含めません。カレンダーキャッシュがない、2分より古い、壊れている、またはCache Serviceが失敗した場合は、権限キャッシュで許可済みのユーザーに限って通常のSpreadsheet一括取得と集計へフォールバックします。
 
-`serverTiming`には、Apps Script処理開始を基準とした`permissionCheckCompletedMs`、`serverCacheLookupCompletedMs`、`spreadsheetFetchCompletedMs`、`cacheHit`を追加しています。ブラウザーの`window.__danproCalendarTiming`にある`getCalendarDataStartedMs`と`latestCalendarRenderedMs`を合わせると、RPC開始から混雑記号描画までを確認できます。キャッシュ命中時の`spreadsheetFetchCompletedMs`は`null`です。
+アクセス権限は同じ時間主導更新でDrive APIから取得し、個別共有ユーザーと閲覧可能なGoogle Groupメンバーは正規化メールのSHA-256ハッシュ、ドメイン共有はドメイン条件としてScript Cacheへ75秒保存します。有効性は生成から65秒までに制限します。Webリクエストでは`Session.getActiveUser().getEmail()`と権限キャッシュだけを照合するため、カレンダーキャッシュ命中時は`SpreadsheetApp.openById()`、Range読み取り、Drive API、Groups APIを呼びません。メールを取得できない場合、権限キャッシュがない・破損・期限切れの場合、または照合不一致の場合はSpreadsheetへフォールバックせず`ACCESS_DENIED`にします。`getDayDetails()`にも同じ照合を適用します。
+
+Drive権限の`user`、`group`、`domain`、`anyone`を区別します。Google Groupは直接メンバーの役割がOWNER、MANAGER、MEMBERのユーザーだけを許可し、子Groupを再帰的に展開します。ドメイン／全員共有は検索可能な権限だけを許可対象とし、「リンクを知っているユーザー」型の権限は安全側で許可リストへ展開しません。トリガー実行者がGroupメンバー一覧を閲覧できない場合や上限を超えた場合は権限キャッシュを更新せず、既存キャッシュも65秒を超えると無効になるfail-closed方式です。Google側でGroupメンバー変更の反映に遅延がある場合、アプリはDrive／Groups APIで確認できた状態を次回トリガーで反映します。
+
+`serverTiming`には、Apps Script処理開始を基準とした`activeUserLookupMs`、`accessCacheLookupMs`、`permissionCheckCompletedMs`、`serverCacheLookupCompletedMs`、`spreadsheetFetchCompletedMs`、`cacheHit`を含めます。ブラウザーの`window.__danproCalendarTiming`にある`getCalendarDataStartedMs`と`latestCalendarRenderedMs`を合わせると、RPC開始から混雑記号描画までを確認できます。キャッシュ命中時の`spreadsheetOpenMs`とRange読み取り回数は0、`spreadsheetFetchCompletedMs`は`null`です。
 
 ## 事前集計トリガー（本番では手動設定）
 
@@ -52,4 +56,4 @@ Spreadsheetから読み取った詳細表示対象データとsheetIdをSHA-256�
 3. 時間ベースのトリガー: 分ベースのタイマー
 4. 時間の間隔: 1分おき
 
-トリガー作成者には対象Spreadsheetの閲覧権限が必要です。最初にエディタから関数を1回実行して権限を承認し、実行がエラーなく完了してタイミングログが出ることを確認してください。関数はSpreadsheetへ書き込みません。Webアプリは従来どおり「アクセスしているユーザーとして実行」する構成を維持し、共有Script Cacheの内容はSpreadsheetへのアクセス確認に成功したユーザーへだけ返します。
+トリガー作成者には対象Spreadsheetの閲覧権限に加え、Driveメタデータと、共有にGoogle Groupがある場合はそのメンバー一覧を閲覧できる権限が必要です。Drive API v3はmanifestで有効化済みです。コード更新後はエディタから関数を1回実行して追加スコープを承認し、実行がエラーなく完了することを確認してください。関数はSpreadsheetや共有設定へ書き込みません。Webアプリは従来どおり「アクセスしているユーザーとして実行」する構成を維持します。
