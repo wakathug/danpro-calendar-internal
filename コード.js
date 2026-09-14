@@ -12,6 +12,10 @@ const CALENDAR_CONFIG = Object.freeze({
   detailCacheActiveKey: 'day-details:active:v1',
   detailCacheKeyPrefix: 'day-details:v1:',
   detailCacheMaxValueChars: 24000,
+  calendarCacheKey: 'calendar-aggregate:v1',
+  calendarCacheTtlSeconds: 180,
+  calendarCacheMaxAgeMs: 2 * 60 * 1000,
+  calendarCacheMaxValueChars: 90000,
   levels: Object.freeze([
     Object.freeze({ level: 0, max: 0, symbol: '◎', label: '余裕あり' }),
     Object.freeze({ level: 1, max: 2, symbol: '○', label: '対応可能' }),
@@ -41,8 +45,8 @@ function doGet() {
 }
 
 /**
- * 呼び出しごとに本番Spreadsheetを読み取り、日付・集計対象工程数・混雑度だけを返します。
- * 顧客名や案件内容などの明細は返しません。
+ * Spreadsheetへのアクセス権を軽量確認してから、事前集計済み表示キャッシュを返します。
+ * キャッシュミス・期限切れ時だけ通常のSpreadsheet集計へフォールバックします。
  *
  * @return {{ok: boolean, data: Object}|{ok: false, error: {code: string}}}
  */
@@ -61,8 +65,54 @@ function getCalendarData() {
  *   timeZone: string, spreadsheetUrl: string}}
  */
 function getCalendarData_() {
-  const timing = {
+  const timing = createCalendarTiming_();
+  const spreadsheet = verifySpreadsheetAccess_(timing);
+  const cached = getCachedCalendarAggregate_(timing);
+  if (cached) {
+    const result = buildCachedCalendarResponse_(cached);
+    return attachCalendarTiming_(result, timing, true);
+  }
+
+  const result = buildFreshCalendarData_(spreadsheet, timing, true);
+  timing.spreadsheetFetchCompletedMs = Date.now() - timing.startedAt;
+  cacheCalendarAggregate_(result);
+  delete result.sheetId;
+  return attachCalendarTiming_(result, timing, false);
+}
+
+/**
+ * 1分程度の時間主導トリガーから呼び出す事前集計更新関数です。
+ * トリガーの新規作成は行わず、既存Spreadsheetを読み取って表示専用キャッシュだけを更新します。
+ */
+function refreshCalendarAggregateCache() {
+  try {
+    const timing = createCalendarTiming_();
+    const spreadsheet = verifySpreadsheetAccess_(timing);
+    const result = buildFreshCalendarData_(spreadsheet, timing, false);
+    timing.spreadsheetFetchCompletedMs = Date.now() - timing.startedAt;
+    cacheCalendarAggregate_(result);
+    delete result.sheetId;
+    attachCalendarTiming_(result, timing, false);
+    return {
+      ok: true,
+      data: {
+        updatedAt: result.updatedAt,
+        dayCount: result.days.length,
+        serverTiming: result.serverTiming,
+      },
+    };
+  } catch (error) {
+    return createSafeErrorResponse_(error);
+  }
+}
+
+function createCalendarTiming_() {
+  return {
     startedAt: Date.now(),
+    permissionCheckCompletedMs: null,
+    serverCacheLookupCompletedMs: null,
+    spreadsheetFetchCompletedMs: null,
+    cacheHit: false,
     spreadsheetOpenMs: 0,
     spreadsheetReadMs: 0,
     sheetValueReadCalls: 0,
@@ -72,19 +122,42 @@ function getCalendarData_() {
     revisionMs: 0,
     detailCacheWriteMs: 0,
   };
-  const layout = resolveCurrentScheduleSheet_(timing);
+}
+
+function verifySpreadsheetAccess_(timing) {
+  const openStartedAt = Date.now();
+  const spreadsheet = SpreadsheetApp.openById(CALENDAR_CONFIG.spreadsheetId);
+  spreadsheet.getId();
+  timing.spreadsheetOpenMs += Date.now() - openStartedAt;
+  timing.permissionCheckCompletedMs = Date.now() - timing.startedAt;
+  return spreadsheet;
+}
+
+function attachCalendarTiming_(result, timing, cacheHit) {
+  timing.cacheHit = cacheHit;
+  timing.totalMs = Date.now() - timing.startedAt;
+  delete timing.startedAt;
+  result.serverTiming = timing;
+  console.info(`getCalendarData timing ${JSON.stringify(timing)}`);
+  return result;
+}
+
+function buildFreshCalendarData_(spreadsheet, timing, cacheDetails) {
+  const layout = resolveCurrentScheduleSheet_(timing, spreadsheet);
   const snapshot = readScheduleSnapshot_(layout, timing);
   const revisionStartedAt = Date.now();
   const detailRevision = buildDetailRevision_(layout.sheetId, snapshot);
   timing.revisionMs = Date.now() - revisionStartedAt;
-  const cacheStartedAt = Date.now();
-  cacheDayDetailsSnapshot_(
-    layout.sheetId,
-    snapshot.detailsByDate,
-    snapshot.updatedAt,
-    detailRevision,
-  );
-  timing.detailCacheWriteMs = Date.now() - cacheStartedAt;
+  if (cacheDetails) {
+    const cacheStartedAt = Date.now();
+    cacheDayDetailsSnapshot_(
+      layout.sheetId,
+      snapshot.detailsByDate,
+      snapshot.updatedAt,
+      detailRevision,
+    );
+    timing.detailCacheWriteMs = Date.now() - cacheStartedAt;
+  }
 
   const days = Object.keys(snapshot.countsByDate)
     .sort()
@@ -103,10 +176,8 @@ function getCalendarData_() {
     throw new Error('N列以降の2行目に有効な日付が見つかりません。');
   }
 
-  timing.totalMs = Date.now() - timing.startedAt;
-  delete timing.startedAt;
-  console.info(`getCalendarData timing ${JSON.stringify(timing)}`);
   return {
+    sheetId: layout.sheetId,
     days,
     levels: CALENDAR_CONFIG.levels.map((rule) => ({
       level: rule.level,
@@ -115,10 +186,110 @@ function getCalendarData_() {
     })),
     updatedAt: snapshot.updatedAt,
     detailRevision,
-    serverTiming: timing,
     timeZone: CALENDAR_CONFIG.timeZone,
     spreadsheetUrl: buildSpreadsheetUrl_(layout.sheetId),
   };
+}
+
+function buildCachedCalendarResponse_(cached) {
+  return {
+    days: cached.days,
+    levels: cached.levels,
+    updatedAt: cached.updatedAt,
+    detailRevision: cached.detailRevision,
+    timeZone: CALENDAR_CONFIG.timeZone,
+    spreadsheetUrl: buildSpreadsheetUrl_(cached.sheetId),
+  };
+}
+
+function getCachedCalendarAggregate_(timing) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const serialized = cache.get(CALENDAR_CONFIG.calendarCacheKey);
+    if (!serialized) return null;
+    const cached = JSON.parse(serialized);
+    if (!isValidCalendarAggregate_(cached)) return null;
+    if (Date.now() - cached.generatedAt > CALENDAR_CONFIG.calendarCacheMaxAgeMs) return null;
+    return cached;
+  } catch (error) {
+    return null;
+  } finally {
+    timing.serverCacheLookupCompletedMs = Date.now() - timing.startedAt;
+  }
+}
+
+function cacheCalendarAggregate_(result) {
+  try {
+    const payload = {
+      version: 1,
+      generatedAt: Date.now(),
+      sheetId: String(result.sheetId),
+      days: result.days.map((day) => ({
+        date: day.date,
+        count: day.count,
+        level: day.level,
+        symbol: day.symbol,
+      })),
+      levels: result.levels.map((level) => ({
+        level: level.level,
+        symbol: level.symbol,
+        label: level.label,
+      })),
+      updatedAt: result.updatedAt,
+      detailRevision: result.detailRevision,
+    };
+    const serialized = JSON.stringify(payload);
+    if (serialized.length > CALENDAR_CONFIG.calendarCacheMaxValueChars) return;
+    CacheService.getScriptCache().put(
+      CALENDAR_CONFIG.calendarCacheKey,
+      serialized,
+      CALENDAR_CONFIG.calendarCacheTtlSeconds,
+    );
+  } catch (error) {
+    console.warn('calendar aggregate cache write skipped');
+  }
+}
+
+function isValidCalendarAggregate_(cached) {
+  if (
+    !cached
+    || cached.version !== 1
+    || !Number.isFinite(cached.generatedAt)
+    || cached.generatedAt > Date.now() + 60 * 1000
+    || typeof cached.sheetId !== 'string'
+    || !/^\d+$/.test(cached.sheetId)
+    || !Array.isArray(cached.days)
+    || cached.days.length === 0
+    || cached.days.length > 1000
+    || !Array.isArray(cached.levels)
+    || cached.levels.length !== CALENDAR_CONFIG.levels.length
+    || typeof cached.updatedAt !== 'string'
+    || !Number.isFinite(Date.parse(cached.updatedAt))
+    || typeof cached.detailRevision !== 'string'
+    || !/^[A-Za-z0-9_-]{43}$/.test(cached.detailRevision)
+  ) return false;
+
+  const levelsAreValid = cached.levels.every((level, index) => {
+    const expected = CALENDAR_CONFIG.levels[index];
+    return level
+      && level.level === expected.level
+      && level.symbol === expected.symbol
+      && level.label === expected.label;
+  });
+  if (!levelsAreValid) return false;
+
+  return cached.days.every((day) => {
+    if (
+      !day
+      || typeof day.date !== 'string'
+      || normalizeDateKey_(day.date) !== day.date
+      || !Number.isInteger(day.count)
+      || day.count < 0
+      || !Number.isInteger(day.level)
+    ) return false;
+    const expected = getCongestionRule_(day.count);
+    return day.level === expected.level && day.symbol === expected.symbol;
+  });
 }
 
 /**
@@ -214,11 +385,14 @@ function isAccessDeniedError_(error) {
  *   dateColumnCount: number, parsedHeaders: Array<?Date>,
  *   displayValues: Array<Array<string>>}}
  */
-function resolveCurrentScheduleSheet_(timing) {
+function resolveCurrentScheduleSheet_(timing, openedSpreadsheet) {
   const resolutionStartedAt = Date.now();
-  const openStartedAt = Date.now();
-  const spreadsheet = SpreadsheetApp.openById(CALENDAR_CONFIG.spreadsheetId);
-  if (timing) timing.spreadsheetOpenMs += Date.now() - openStartedAt;
+  let spreadsheet = openedSpreadsheet;
+  if (!spreadsheet) {
+    const openStartedAt = Date.now();
+    spreadsheet = SpreadsheetApp.openById(CALENDAR_CONFIG.spreadsheetId);
+    if (timing) timing.spreadsheetOpenMs += Date.now() - openStartedAt;
+  }
   const sheets = spreadsheet.getSheets();
   const now = new Date();
   for (let index = 0; index < sheets.length; index += 1) {

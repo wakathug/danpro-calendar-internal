@@ -153,26 +153,37 @@ class MockCache {
   constructor() {
     this.values = new Map();
     this.metrics = { get: 0, put: 0, putAll: 0 };
+    this.failGet = false;
+    this.failPut = false;
   }
 
   get(key) {
     this.metrics.get += 1;
+    if (this.failGet) throw new Error('mock cache get failure');
     return this.values.has(key) ? this.values.get(key) : null;
   }
 
   put(key, value) {
     this.metrics.put += 1;
+    if (this.failPut) throw new Error('mock cache put failure');
     this.values.set(key, String(value));
   }
 
   putAll(values) {
     this.metrics.putAll += 1;
+    if (this.failPut) throw new Error('mock cache putAll failure');
     Object.entries(values).forEach(([key, value]) => this.values.set(key, String(value)));
+  }
+
+  resetMetrics() {
+    this.metrics = { get: 0, put: 0, putAll: 0 };
   }
 
   clear() {
     this.values.clear();
-    this.metrics = { get: 0, put: 0, putAll: 0 };
+    this.resetMetrics();
+    this.failGet = false;
+    this.failPut = false;
   }
 }
 
@@ -235,6 +246,13 @@ class MockElement {
 function makeCalendarPayload(
   days = [{ date: '2026-09-08', count: 1, level: 1, symbol: '○' }],
   detailRevision = 'revision-a',
+  serverTiming = {
+    permissionCheckCompletedMs: 45,
+    serverCacheLookupCompletedMs: 48,
+    spreadsheetFetchCompletedMs: 760,
+    cacheHit: false,
+    totalMs: 765,
+  },
 ) {
   return {
     ok: true,
@@ -248,6 +266,7 @@ function makeCalendarPayload(
       ],
       updatedAt: '2026-09-08T07:00:00.000Z',
       detailRevision,
+      serverTiming,
       timeZone: 'Asia/Tokyo',
       spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/safe-test-id/edit?gid=1730965450',
     },
@@ -541,6 +560,7 @@ let spreadsheetSheets = [descriptionSheet, targetSheet];
 let openedSpreadsheetId = '';
 let spreadsheetError = null;
 const userCache = new MockCache();
+const scriptCache = new MockCache();
 const context = {
   console,
   Date,
@@ -557,6 +577,9 @@ const context = {
       openedSpreadsheetId = id;
       if (spreadsheetError) throw spreadsheetError;
       return {
+        getId() {
+          return id;
+        },
         getSheets() {
           return spreadsheetSheets;
         },
@@ -566,6 +589,9 @@ const context = {
   CacheService: {
     getUserCache() {
       return userCache;
+    },
+    getScriptCache() {
+      return scriptCache;
     },
   },
   Utilities: {
@@ -585,6 +611,7 @@ vm.createContext(context);
 vm.runInContext(serverSource, context, { filename: 'コード.js' });
 
 userCache.clear();
+scriptCache.clear();
 resetSpreadsheetMetrics();
 const calendarResponse = context.getCalendarData();
 assert.equal(calendarResponse.ok, true);
@@ -620,6 +647,23 @@ assert.deepEqual(copySpreadsheetMetrics(), {
 });
 assert.equal(calendar.serverTiming.sheetValueReadCalls, 2);
 assert.equal(calendar.serverTiming.mergedRangeReadCalls, 1);
+assert.equal(calendar.serverTiming.cacheHit, false);
+assert.ok(calendar.serverTiming.permissionCheckCompletedMs !== null);
+assert.ok(calendar.serverTiming.serverCacheLookupCompletedMs !== null);
+assert.ok(calendar.serverTiming.spreadsheetFetchCompletedMs !== null);
+assert.ok(calendar.serverTiming.permissionCheckCompletedMs <= calendar.serverTiming.totalMs);
+assert.ok(calendar.serverTiming.serverCacheLookupCompletedMs <= calendar.serverTiming.totalMs);
+assert.ok(calendar.serverTiming.spreadsheetFetchCompletedMs <= calendar.serverTiming.totalMs);
+const aggregatePayload = JSON.parse(scriptCache.values.get('calendar-aggregate:v1'));
+assert.deepEqual(
+  Object.keys(aggregatePayload).sort(),
+  ['days', 'detailRevision', 'generatedAt', 'levels', 'sheetId', 'updatedAt', 'version'],
+);
+assert.deepEqual(Object.keys(aggregatePayload.days[0]).sort(), ['count', 'date', 'level', 'symbol']);
+assert.doesNotMatch(
+  JSON.stringify(aggregatePayload),
+  /customer|content|period|work|spreadsheetUrl|https?:/i,
+);
 
 const metricsBeforeWarmHit = copySpreadsheetMetrics();
 const warmCacheHit = context.getDayDetails('2026-01-01');
@@ -628,14 +672,76 @@ assert.equal(warmCacheHit.data.items.length, 2);
 assert.equal(warmCacheHit.data.revision, calendar.detailRevision);
 assert.deepEqual(copySpreadsheetMetrics(), metricsBeforeWarmHit);
 
+userCache.clear();
+scriptCache.clear();
+resetSpreadsheetMetrics();
+const triggerRefresh = context.refreshCalendarAggregateCache();
+assert.equal(triggerRefresh.ok, true);
+assert.equal(triggerRefresh.data.dayCount, 3);
+assert.equal(userCache.metrics.get, 0);
+assert.equal(userCache.metrics.put, 0);
+assert.equal(userCache.metrics.putAll, 0);
+assert.equal(scriptCache.metrics.put, 1);
+assert.deepEqual(copySpreadsheetMetrics(), {
+  openById: 1,
+  getRange: 3,
+  getValues: 0,
+  getDisplayValues: 2,
+  getMergedRanges: 1,
+  getDisplayValue: 0,
+});
+
+scriptCache.resetMetrics();
+resetSpreadsheetMetrics();
 const unchangedCalendar = context.getCalendarData().data;
 assert.equal(unchangedCalendar.detailRevision, calendar.detailRevision);
+assert.equal(unchangedCalendar.serverTiming.cacheHit, true);
+assert.ok(unchangedCalendar.serverTiming.permissionCheckCompletedMs !== null);
+assert.ok(unchangedCalendar.serverTiming.serverCacheLookupCompletedMs !== null);
+assert.equal(unchangedCalendar.serverTiming.spreadsheetFetchCompletedMs, null);
+assert.deepEqual(copySpreadsheetMetrics(), {
+  openById: 1,
+  getRange: 0,
+  getValues: 0,
+  getDisplayValues: 0,
+  getMergedRanges: 0,
+  getDisplayValue: 0,
+});
+assert.equal(scriptCache.metrics.get, 1);
 const originalCustomer = targetSheet.values[2][4];
 targetSheet.values[2][4] = '顧客B';
+assert.equal(context.refreshCalendarAggregateCache().ok, true);
 const changedCalendar = context.getCalendarData().data;
 assert.notEqual(changedCalendar.detailRevision, calendar.detailRevision);
 targetSheet.values[2][4] = originalCustomer;
+assert.equal(context.refreshCalendarAggregateCache().ok, true);
 assert.equal(context.getCalendarData().data.detailRevision, calendar.detailRevision);
+
+const staleAggregate = JSON.parse(scriptCache.values.get('calendar-aggregate:v1'));
+staleAggregate.generatedAt = Date.now() - (2 * 60 * 1000) - 1;
+scriptCache.values.set('calendar-aggregate:v1', JSON.stringify(staleAggregate));
+spreadsheetError = new Error('Service invoked too many times: Spreadsheet. Trigger refresh failed.');
+assert.deepEqual(
+  JSON.parse(JSON.stringify(context.refreshCalendarAggregateCache())),
+  { ok: false, error: { code: 'DATA_FETCH_FAILED' } },
+);
+spreadsheetError = null;
+resetSpreadsheetMetrics();
+const staleAfterFailedRefresh = context.getCalendarData();
+assert.equal(staleAfterFailedRefresh.ok, true);
+assert.equal(staleAfterFailedRefresh.data.serverTiming.cacheHit, false);
+assert.ok(staleAfterFailedRefresh.data.serverTiming.spreadsheetFetchCompletedMs !== null);
+assert.ok(spreadsheetMetrics.getDisplayValues > 0);
+
+scriptCache.clear();
+scriptCache.failPut = true;
+resetSpreadsheetMetrics();
+const cacheWriteFailureFallback = context.getCalendarData();
+assert.equal(cacheWriteFailureFallback.ok, true);
+assert.equal(cacheWriteFailureFallback.data.serverTiming.cacheHit, false);
+assert.equal(scriptCache.values.has('calendar-aggregate:v1'), false);
+assert.ok(spreadsheetMetrics.getDisplayValues > 0);
+scriptCache.clear();
 
 userCache.clear();
 resetSpreadsheetMetrics();
@@ -696,6 +802,7 @@ spreadsheetSheets = [targetSheet, futureDatedRightSheet];
 assert.equal(context.resolveCurrentScheduleSheet_().sheet.getSheetId(), 1730965450);
 
 spreadsheetSheets = [newestLeftSheet, targetSheet];
+scriptCache.clear();
 const activeCacheBeforeSheetSwitch = JSON.parse(
   userCache.values.get('day-details:active:v1'),
 );
@@ -718,12 +825,14 @@ assert.equal(newestDetails.data.items[0].work, '新しい左端タブの作業')
 assert.deepEqual(copySpreadsheetMetrics(), metricsBeforeNewestDetails);
 
 spreadsheetSheets = [descriptionSheet, hiddenValidSheet];
+scriptCache.clear();
 assert.deepEqual(
   JSON.parse(JSON.stringify(context.getCalendarData())),
   { ok: false, error: { code: 'DATA_FETCH_FAILED' } },
 );
 
 spreadsheetSheets = [descriptionSheet, targetSheet];
+scriptCache.clear();
 assert.equal(context.getCalendarData().ok, true);
 
 const newYearDetailsResponse = context.getDayDetails('2026-01-01');
@@ -787,6 +896,7 @@ for (let row = 2; row <= 5; row += 1) {
   mixedValues[row][column] = work;
 });
 spreadsheetSheets = [new MockSheet(5005, mixedValues, { name: '混在日' })];
+scriptCache.clear();
 const mixedCalendar = context.getCalendarData().data;
 assert.deepEqual(
   Array.from(mixedCalendar.days, (day) => ({ ...day })),
@@ -796,6 +906,7 @@ spreadsheetSheets = [descriptionSheet, targetSheet];
 
 const mergedDetailsSheet = makeMergedDetailsSheet();
 spreadsheetSheets = [mergedDetailsSheet];
+scriptCache.clear();
 assert.equal(context.getCalendarData().ok, true);
 const metricsBeforeMergedDetailsHit = copySpreadsheetMetrics();
 const mergedDetails = context.getDayDetails('2026-09-10').data;
@@ -818,6 +929,7 @@ assert.equal(context.normalizePeriod_('ＰＭ'), 'PM');
 assert.equal(context.normalizePeriod_(''), '');
 assert.equal(context.normalizePeriod_('不明'), '');
 spreadsheetSheets = [descriptionSheet, targetSheet];
+scriptCache.clear();
 assert.equal(context.getCalendarData().ok, true);
 
 assert.deepEqual(
@@ -830,6 +942,8 @@ assert.deepEqual(
 );
 
 userCache.clear();
+assert.equal(scriptCache.values.has('calendar-aggregate:v1'), true);
+scriptCache.resetMetrics();
 spreadsheetError = new Error(
   'You do not have permission to access the requested document. Sensitive Google details.',
 );
@@ -838,6 +952,7 @@ assert.deepEqual(
   JSON.parse(JSON.stringify(calendarDenied)),
   { ok: false, error: { code: 'ACCESS_DENIED' } },
 );
+assert.equal(scriptCache.metrics.get, 0);
 assert.doesNotMatch(JSON.stringify(calendarDenied), /permission|Sensitive|Google details/i);
 const detailDenied = context.getDayDetails('2026-01-01');
 assert.deepEqual(
@@ -855,6 +970,7 @@ assert.deepEqual(
   { ok: false, error: { code: 'DATA_FETCH_FAILED' } },
 );
 assert.doesNotMatch(JSON.stringify(transientFailure), /Service invoked|Internal transient/i);
+assert.equal(scriptCache.metrics.get, 0);
 spreadsheetError = null;
 
 const parsed = context.parseDateHeaders_(
@@ -881,7 +997,10 @@ assert.match(serverSource, /COUNTED_WORK_TYPES\.includes\(trimmed_\(value\)\)/);
 assert.match(serverSource, /getMergedRanges\(\)/);
 assert.doesNotMatch(serverSource, /isPm_|isAm_/);
 assert.match(serverSource, /CacheService\.getUserCache\(\)/);
-assert.doesNotMatch(serverSource, /getScriptCache\(\)|getDocumentCache\(\)|PropertiesService/);
+assert.equal((serverSource.match(/CacheService\.getScriptCache\(\)/g) || []).length, 2);
+assert.doesNotMatch(serverSource, /getDocumentCache\(\)|PropertiesService|ScriptApp\.newTrigger/);
+assert.match(serverSource, /function refreshCalendarAggregateCache\(\)/);
+assert.match(serverSource, /verifySpreadsheetAccess_\(timing\)[\s\S]*?getCachedCalendarAggregate_\(timing\)/);
 assert.match(serverSource, /detailCacheTtlSeconds:\s*75/);
 assert.match(serverSource, /generation = `\$\{sheetId\}:/);
 assert.match(serverSource, /Utilities\.DigestAlgorithm\.SHA_256/);
@@ -1033,6 +1152,40 @@ async function testClientBehavior() {
     },
     { html: 0, cached: null, request: 0.5, complete: 801, latest: 801.5 },
   );
+
+  const firstAccessServerCacheUi = runClientScenario({
+    calendarResponse: makeCalendarPayload(undefined, 'revision-a', {
+      permissionCheckCompletedMs: 45,
+      serverCacheLookupCompletedMs: 48,
+      spreadsheetFetchCompletedMs: null,
+      cacheHit: true,
+      totalMs: 50,
+    }),
+    deferCalendar: true,
+  });
+  assert.equal(firstAccessServerCacheUi.window.__danproCalendarTiming.cachedCalendarRenderedMs, null);
+  firstAccessServerCacheUi.advancePerformance(120);
+  firstAccessServerCacheUi.pendingCalendars[0].resolve();
+  assert.deepEqual(
+    {
+      request: firstAccessServerCacheUi.window.__danproCalendarTiming.getCalendarDataStartedMs,
+      complete: firstAccessServerCacheUi.window.__danproCalendarTiming.getCalendarDataCompletedMs,
+      symbols: firstAccessServerCacheUi.window.__danproCalendarTiming.latestCalendarRenderedMs,
+    },
+    { request: 0.5, complete: 121, symbols: 121.5 },
+  );
+  assert.deepEqual(
+    firstAccessServerCacheUi.window.__danproCalendarTiming.serverTiming,
+    {
+      permissionCheckCompletedMs: 45,
+      serverCacheLookupCompletedMs: 48,
+      spreadsheetFetchCompletedMs: null,
+      cacheHit: true,
+      totalMs: 50,
+    },
+  );
+  assert.ok(firstAccessServerCacheUi.elements.get('calendar-grid').children
+    .some((element) => element.children[1]?.textContent === '○'));
 
   const cachedDeniedUi = runClientScenario({
     cachedCalendar: makeStoredCalendar(),
@@ -1381,6 +1534,9 @@ testClientBehavior().then(() => {
   console.log('PASS: second hover and hover-followed-by-click reuse one detail request');
   console.log('PASS: unchanged 60-second refresh retains details; changed revision invalidates them');
   console.log('PASS: cached/no-cache startup, sheet switch, other-month restore, and timing milestones');
+  console.log('PASS: precomputed server cache hit uses permission check but zero sheet Range reads');
+  console.log('PASS: absent/stale/write-failed server cache falls back to normal Spreadsheet aggregation');
+  console.log('PASS: denied users cannot read the shared server cache; trigger stores no customer details');
   console.log('PASS: permission messages, PC hover, mobile tap, and modal-only detail errors');
 }).catch((error) => {
   console.error(error);

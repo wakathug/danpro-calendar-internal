@@ -38,3 +38,18 @@ Spreadsheetから読み取った詳細表示対象データとsheetIdをSHA-256�
 成功したカレンダーの`days`（date / count / level / symbol）、`levels`、`updatedAt`だけをブラウザーのlocalStorageへ最大24時間保存します。次回起動時はこれを先に描画し、直後に通常の`getCalendarData()`で最新データへ更新します。顧客名、商品名、工程詳細、period、Spreadsheet URL、detailRevisionは保存しません。アクセス拒否時は保存済みカレンダーと画面表示を消去します。
 
 サーバーは候補シートごとにヘッダー行から最終行までを1つのRangeで一括取得し、その配列を最新シート判定、集計、詳細生成、detailRevision生成で再利用します。`getCalendarData()`の応答にはSpreadsheetオープン、Range読み取り、最新シート判定、集計、revision、詳細キャッシュ保存の各所要時間を`serverTiming`として含め、ブラウザー側は初期表示の各時点を`window.__danproCalendarTiming`とコンソールへ記録します。この計測値と顧客情報はlocalStorageへ保存しません。
+
+初回ブラウザー向けには、Apps ScriptのScript Cacheへ表示専用の事前集計を最大3分保存します。内容は`days`（date / count / level / symbol）、`levels`、更新時刻、対象sheetId、detailRevisionだけで、顧客名、商品名、工程詳細、period、Spreadsheet URLは含めません。`getCalendarData()`は毎回、アクセス中ユーザーが対象Spreadsheetを開けることを最小限のアクセスで確認してからScript Cacheを参照します。キャッシュがない、2分より古い、壊れている、またはCache Serviceが失敗した場合は、通常のSpreadsheet一括取得と集計へフォールバックします。
+
+`serverTiming`には、Apps Script処理開始を基準とした`permissionCheckCompletedMs`、`serverCacheLookupCompletedMs`、`spreadsheetFetchCompletedMs`、`cacheHit`を追加しています。ブラウザーの`window.__danproCalendarTiming`にある`getCalendarDataStartedMs`と`latestCalendarRenderedMs`を合わせると、RPC開始から混雑記号描画までを確認できます。キャッシュ命中時の`spreadsheetFetchCompletedMs`は`null`です。
+
+## 事前集計トリガー（本番では手動設定）
+
+コード内の`refreshCalendarAggregateCache()`が表示専用キャッシュを再集計する関数です。リポジトリや`clasp push`からトリガーを自動作成しません。本番で有効化する場合は、Apps Scriptエディタの「トリガー」から次の設定を1件追加してください。
+
+1. 実行する関数: `refreshCalendarAggregateCache`
+2. イベントのソース: 時間主導型
+3. 時間ベースのトリガー: 分ベースのタイマー
+4. 時間の間隔: 1分おき
+
+トリガー作成者には対象Spreadsheetの閲覧権限が必要です。最初にエディタから関数を1回実行して権限を承認し、実行がエラーなく完了してタイミングログが出ることを確認してください。関数はSpreadsheetへ書き込みません。Webアプリは従来どおり「アクセスしているユーザーとして実行」する構成を維持し、共有Script Cacheの内容はSpreadsheetへのアクセス確認に成功したユーザーへだけ返します。
