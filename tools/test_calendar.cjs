@@ -974,8 +974,8 @@ assert.equal(newYearDetails.items.length, 2);
 assert.deepEqual(
   Array.from(newYearDetails.items, (item) => ({ ...item })),
   [
-    { customer: '顧客A', content: 'ギフト箱', work: 'デザイン', period: 'PM' },
     { customer: '', content: '内容のみ', work: 'サンプル', period: 'AM' },
+    { customer: '顧客A', content: 'ギフト箱', work: 'デザイン', period: 'PM' },
   ],
 );
 assert.ok(newYearDetails.items.every((item) => item.work !== 'KCP' && item.work !== '除外'));
@@ -1045,9 +1045,9 @@ const mergedDetails = context.getDayDetails('2026-09-10').data;
 assert.deepEqual(
   Array.from(mergedDetails.items, (item) => ({ ...item })),
   [
+    { customer: '高井屋', content: 'DINOサブレ箱', work: 'デザイン', period: 'AM' },
     { customer: '', content: '', work: '納品', period: 'PM' },
     { customer: '高井屋', content: 'DINOサブレ箱', work: '印刷', period: 'PM' },
-    { customer: '高井屋', content: 'DINOサブレ箱', work: 'デザイン', period: 'AM' },
     { customer: '高井屋', content: 'DINOサブレ箱', work: '出荷', period: 'PM' },
   ],
 );
@@ -1060,6 +1060,19 @@ assert.equal(context.normalizePeriod_('AM'), 'AM');
 assert.equal(context.normalizePeriod_('ＰＭ'), 'PM');
 assert.equal(context.normalizePeriod_(''), '');
 assert.equal(context.normalizePeriod_('不明'), '');
+const periodOrderSource = [
+  { customer: 'A社', work: '印刷', period: 'PM' },
+  { customer: 'B社', work: 'CAD', period: 'AM' },
+  { customer: 'C社', work: '組立', period: '午前' },
+  { customer: 'D社', work: '梱包', period: '午後' },
+  { customer: 'E社', work: '納品', period: '' },
+  { customer: 'F社', work: '確認', period: '未定' },
+];
+assert.deepEqual(
+  Array.from(context.sortDayDetailItems_(periodOrderSource), (item) => item.customer),
+  ['B社', 'C社', 'A社', 'D社', 'E社', 'F社'],
+);
+assert.deepEqual(periodOrderSource.map((item) => item.customer), ['A社', 'B社', 'C社', 'D社', 'E社', 'F社']);
 spreadsheetSheets = [descriptionSheet, targetSheet];
 scriptCache.values.delete('calendar-aggregate:v1');
 assert.equal(context.getCalendarData().ok, true);
@@ -1605,9 +1618,11 @@ async function testClientBehavior() {
       data: {
         date: '2026-09-08',
         items: [
-          { customer: '高井屋', content: 'DINOサブレ箱', work: '印刷', period: 'PM' },
-          { customer: '東洋染化', content: '', work: 'シート入', period: 'AM' },
-          { customer: '期間未設定', content: '', work: '梱包', period: '' },
+          { customer: 'B社', content: '', work: 'CAD', period: 'AM' },
+          { customer: 'C社', content: '', work: '組立', period: 'AM' },
+          { customer: 'A社', content: '', work: '印刷', period: 'PM' },
+          { customer: 'D社', content: '', work: '梱包', period: 'PM' },
+          { customer: '期間未設定', content: '', work: '納品', period: '' },
         ],
         revision: 'revision-a',
       },
@@ -1631,7 +1646,7 @@ async function testClientBehavior() {
   assert.equal(hoverUi.elements.get('hover-preview').children[0].textContent, '9月8日（火）');
   assert.deepEqual(
     hoverUi.elements.get('hover-preview').children[1].children.map((item) => item.textContent),
-    ['高井屋：印刷（午後）', '東洋染化：シート入（午前）', '期間未設定：梱包'],
+    ['B社：CAD（午前）', 'C社：組立（午前）', 'A社：印刷（午後）', 'D社：梱包（午後）', '期間未設定：納品'],
   );
 
   const modalUi = runClientScenario({
@@ -1641,9 +1656,11 @@ async function testClientBehavior() {
       data: {
         date: '2026-09-08',
         items: [
-          { customer: '高井屋', content: 'DINOサブレ箱', work: '印刷', period: 'PM' },
-          { customer: '東洋染化', content: '', work: 'シート入', period: 'AM' },
-          { customer: '期間未設定', content: '', work: '梱包' },
+          { customer: 'B社', content: '', work: 'CAD', period: 'AM' },
+          { customer: 'C社', content: '', work: '組立', period: 'AM' },
+          { customer: 'A社', content: '', work: '印刷', period: 'PM' },
+          { customer: 'D社', content: '', work: '梱包', period: 'PM' },
+          { customer: '期間未設定', content: '', work: '納品' },
         ],
         revision: 'revision-a',
       },
@@ -1658,9 +1675,11 @@ async function testClientBehavior() {
   assert.deepEqual(
     modalCards.map((card) => [card.children[0].textContent, card.children[1].textContent]),
     [
-      ['高井屋 / DINOサブレ箱', '印刷（午後）'],
-      ['東洋染化', 'シート入（午前）'],
-      ['期間未設定', '梱包'],
+      ['B社', 'CAD（午前）'],
+      ['C社', '組立（午前）'],
+      ['A社', '印刷（午後）'],
+      ['D社', '梱包（午後）'],
+      ['期間未設定', '納品'],
     ],
   );
 
@@ -1674,7 +1693,7 @@ async function testClientBehavior() {
   await hoverButton.listeners.click[0]();
   assert.deepEqual(hoverUi.calls.details, ['2026-09-08']);
   assert.equal(hoverUi.elements.get('detail-backdrop').hidden, false);
-  assert.equal(hoverUi.elements.get('detail-body').children[0].children[0].children[0].textContent, '高井屋 / DINOサブレ箱');
+  assert.equal(hoverUi.elements.get('detail-body').children[0].children[0].children[0].textContent, 'B社');
   hoverUi.elements.get('detail-close').listeners.click[0]();
 
   hoverUi.intervals[0].callback();
@@ -1781,6 +1800,7 @@ testClientBehavior().then(() => {
   console.log('PASS: calendar, day details, and Spreadsheet gid share the same resolver');
   console.log('PASS: initial success reveals link; initial failures keep URL absent and link hidden');
   console.log('PASS: AM/PM and missing-period formatting in hover preview and detail modal');
+  console.log('PASS: day details are stably ordered by AM, PM, then missing/unknown period');
   console.log('PASS: initial hover starts immediately and waits 250 ms before preview display');
   console.log('PASS: pending hover shows loading, then switches to fetched details');
   console.log('PASS: second hover and hover-followed-by-click reuse one detail request');

@@ -576,7 +576,10 @@ function getDayDetails_(dateKey, expectedRevision) {
   }
 
   const cached = getCachedDayDetails_(normalizedDateKey, expectedRevision);
-  if (cached) return cached;
+  if (cached) {
+    cached.items = sortDayDetailItems_(cached.items);
+    return cached;
+  }
 
   const layout = resolveCurrentScheduleSheet_();
   const snapshot = readScheduleSnapshot_(layout);
@@ -589,7 +592,7 @@ function getDayDetails_(dateKey, expectedRevision) {
   );
   return {
     date: normalizedDateKey,
-    items: snapshot.detailsByDate[normalizedDateKey] || [],
+    items: sortDayDetailItems_(snapshot.detailsByDate[normalizedDateKey] || []),
     updatedAt: snapshot.updatedAt,
     revision: detailRevision,
   };
@@ -854,7 +857,7 @@ function cacheDayDetailsSnapshot_(sheetId, detailsByDate, updatedAt, revision) {
     Object.keys(detailsByDate).forEach((date) => {
       const serialized = JSON.stringify({
         date,
-        items: detailsByDate[date],
+        items: sortDayDetailItems_(detailsByDate[date]),
         updatedAt,
         revision,
       });
@@ -1045,6 +1048,23 @@ function normalizePeriod_(value) {
   if (normalized === 'AM' || normalized === '午前') return 'AM';
   if (normalized === 'PM' || normalized === '午後') return 'PM';
   return '';
+}
+
+/**
+ * AM、PM、期間なし・未知値の順へ並べ、同じ時間帯では元の行順を維持します。
+ * Array#sortに依存せず、元配列も変更しない安定したバケット分けです。
+ *
+ * @param {Array<Object>} items
+ * @return {Array<Object>}
+ */
+function sortDayDetailItems_(items) {
+  const buckets = [[], [], []];
+  items.forEach((item) => {
+    const period = normalizePeriod_(item && item.period);
+    const rank = period === 'AM' ? 0 : period === 'PM' ? 1 : 2;
+    buckets[rank].push(item);
+  });
+  return buckets[0].concat(buckets[1], buckets[2]);
 }
 
 /** @return {string} */
