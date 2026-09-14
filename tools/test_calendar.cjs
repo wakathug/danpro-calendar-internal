@@ -1119,8 +1119,15 @@ assert.deepEqual(
 assert.equal(spreadsheetMetrics.openById, 0);
 
 assert.equal(context.refreshCalendarAggregateCache().ok, true);
+const delayedAccessPolicy = JSON.parse(scriptCache.values.get('employee-access:v1'));
+delayedAccessPolicy.generatedAt = Date.now() - (120 * 1000);
+scriptCache.values.set('employee-access:v1', JSON.stringify(delayedAccessPolicy));
+resetSpreadsheetMetrics();
+assert.equal(context.getCalendarData().ok, true);
+assert.equal(spreadsheetMetrics.openById, 0);
+
 const expiredAccessPolicy = JSON.parse(scriptCache.values.get('employee-access:v1'));
-expiredAccessPolicy.generatedAt = Date.now() - (65 * 1000) - 1;
+expiredAccessPolicy.generatedAt = Date.now() - (150 * 1000) - 1;
 scriptCache.values.set('employee-access:v1', JSON.stringify(expiredAccessPolicy));
 resetSpreadsheetMetrics();
 assert.deepEqual(
@@ -1172,7 +1179,7 @@ assert.deepEqual(
 );
 assert.equal(scriptCache.values.get('employee-access:v1'), validPolicyBeforeGroupFailure);
 const expiredPolicyAfterFailure = JSON.parse(validPolicyBeforeGroupFailure);
-expiredPolicyAfterFailure.generatedAt = Date.now() - (65 * 1000) - 1;
+expiredPolicyAfterFailure.generatedAt = Date.now() - (150 * 1000) - 1;
 scriptCache.values.set('employee-access:v1', JSON.stringify(expiredPolicyAfterFailure));
 resetSpreadsheetMetrics();
 assert.deepEqual(
@@ -1252,6 +1259,8 @@ assert.doesNotMatch(serverSource, /getScheduleLayout_|CALENDAR_CONFIG\.sheetId/)
 assert.equal((serverSource.match(/resolveCurrentScheduleSheet_\(/g) || []).length, 3);
 assert.equal(vm.runInContext('CALENDAR_CONFIG.periodColumn', context), 13);
 assert.equal(vm.runInContext('CALENDAR_CONFIG.dateStartColumn', context), 14);
+assert.equal(vm.runInContext('CALENDAR_CONFIG.accessCacheTtlSeconds', context), 180);
+assert.equal(vm.runInContext('CALENDAR_CONFIG.accessCacheMaxAgeMs', context), 150 * 1000);
 assert.match(serverSource, /buildSpreadsheetUrl_\(layout\.sheetId\)/);
 assert.match(serverSource, /for \(let index = 0; index < sheets\.length; index \+= 1\)/);
 assert.doesNotMatch(serverSource, /getName\(\)/);
@@ -1781,6 +1790,7 @@ testClientBehavior().then(() => {
   console.log('PASS: absent/stale/write-failed server cache falls back to normal Spreadsheet aggregation');
   console.log('PASS: direct, nested-group, and domain permissions authorize without request-time Drive access');
   console.log('PASS: missing email, denied user, missing/corrupt/expired access cache all fail closed');
+  console.log('PASS: 120-second trigger delay remains authorized; access fails closed after 150 seconds');
   console.log('PASS: permission removal refresh and failed group refresh expiration prevent stale access');
   console.log('PASS: denied users cannot read the shared server cache; trigger stores no customer details');
   console.log('PASS: permission messages, PC hover, mobile tap, and modal-only detail errors');
