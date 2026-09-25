@@ -16,8 +16,14 @@
 Webアプリdeploymentは次の条件にします。
 
 - 実行ユーザー: 自分
+- アクセス: 匿名を含む全員（入口のHMAC署名検証で拒否）
 - API専用（HTMLなし）
 - Vercel Functionからの署名済みPOSTのみ
+
+この設定を `appsscript.json` の `webapp` に明示し、CLIでversionを更新しても
+Webアプリentry pointが失われないようにします。公開入口では最初にHMAC署名、
+timestamp、nonceを検証し、その後にSpreadsheet共有権限を照合するため、
+署名なしリクエストから社員情報は取得できません。
 
 deploymentを外部公開する前に、対象Spreadsheetの読み取り、Drive権限メタデータ、必要なGoogle Groupメンバー参照だけが許可されていることを確認してください。Spreadsheetへの書き込み処理はありません。
 
