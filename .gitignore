@@ -5,3 +5,7 @@ tools/ui-*.png
 .DS_Store
 Thumbs.db
 .env
+.env.*
+!.env.example
+.vercel/
+gas-internal-api/.clasp.json

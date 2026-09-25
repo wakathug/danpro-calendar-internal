@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel login-panel" id="login-panel" aria-labelledby="login-title">
+        <div class="login-content">
+          <span class="employee-badge">社員専用</span>
+          <h1 id="login-title">混雑見込みカレンダー</h1>
+          <p>ダンプロスケジュールへのアクセス権限があるGoogleアカウントでログインしてください。</p>
+          <a class="login-button" href="/api/auth/login">Googleでログイン</a>
+          <p class="login-note">Google Driveやスプレッドシートへの追加権限は要求しません。</p>
+          <p class="error" id="login-error" role="alert" hidden></p>
+        </div>
+      </section>
+
+      <section class="panel" id="calendar-panel" aria-labelledby="app-title" hidden>
+        <header class="app-header">
+          <div class="title-row">
+            <h1 id="app-title">混雑見込みカレンダー</h1>
+            <span class="employee-badge">社員用</span>
+            <button class="logout-button" id="logout" type="button">ログアウト</button>
+          </div>
+          <p class="subtitle">日付を選ぶと、その日の案件・作業状況を確認できます</p>
+          <a
+            id="source-link"
+            class="source-link"
+            target="_blank"
+            rel="noopener noreferrer"
+            hidden
+          >元のダンプロスケジュールを開く ↗</a>
+        </header>
+
+        <div class="toolbar">
+          <button class="nav-button" id="previous-month" type="button" aria-label="前月を表示">‹</button>
+          <h2 class="month-title" id="month-title"></h2>
+          <button class="nav-button" id="next-month" type="button" aria-label="次月を表示">›</button>
+        </div>
+
+        <div class="secondary-toolbar">
+          <button class="today-button" id="today" type="button">今日</button>
+          <div class="status" id="status" role="status" aria-live="polite">
+            <span class="spinner" id="spinner" aria-hidden="true"></span>
+            <span id="status-text">読み込み中…</span>
+          </div>
+        </div>
+
+        <div class="error" id="error" role="alert" hidden></div>
+
+        <div class="calendar-wrap" id="calendar-wrap" aria-busy="true">
+          <div class="weekdays" aria-hidden="true">
+            <div class="weekday sunday">日</div>
+            <div class="weekday">月</div>
+            <div class="weekday">火</div>
+            <div class="weekday">水</div>
+            <div class="weekday">木</div>
+            <div class="weekday">金</div>
+            <div class="weekday saturday">土</div>
+          </div>
+          <div class="calendar-grid" id="calendar-grid" aria-label="月間カレンダー"></div>
+        </div>
+
+        <section class="legend-section" aria-labelledby="legend-title">
+          <h3 class="legend-title" id="legend-title">混雑度</h3>
+          <ul class="legend" id="legend"></ul>
+        </section>
+      </section>
+    </main>
+
+    <aside class="hover-preview" id="hover-preview" aria-hidden="true" hidden></aside>
+
+    <div class="modal-backdrop" id="detail-backdrop" hidden>
+      <section
+        class="modal"
+        id="detail-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="detail-title"
+      >
+        <header class="modal-header">
+          <h2 class="modal-title" id="detail-title"></h2>
+          <button class="modal-close" id="detail-close" type="button" aria-label="詳細を閉じる">×</button>
+        </header>
+        <div class="modal-body" id="detail-body"></div>
+      </section>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
+

@@ -1,5 +1,7 @@
 # 混雑見込みカレンダー（社員用）
 
+Vercel社員専用版の認証、セッション、署名、脅威モデル、本番化手順は [SECURITY.md](SECURITY.md) を参照してください。既存Apps Script社員画面はバックアップとして維持します。
+
 Google Spreadsheetの日別スケジュールを読み取り、社員用の混雑見込みカレンダーと案件詳細を表示するGoogle Apps Scriptです。
 
 ## 混雑数の定義
