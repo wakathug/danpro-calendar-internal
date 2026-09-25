@@ -30,6 +30,8 @@ OAuth state、PKCE、nonceもRedisへ10分だけ保存し、stateは一度取得
 
 `gas-internal-api/` は、既存社員UIとは別のstandalone Apps Script projectへpushするAPI専用コードです。既存社員UI deploymentのアクセス設定や実行ユーザーは変更しません。
 
+Apps Scriptの `SpreadsheetApp.openById()` は `spreadsheets` scopeを必須とするため、API専用manifestも同scopeを使用します。実装は読み取りメソッドだけを使用し、Spreadsheet書き込みメソッドが存在しないことを回帰テストで固定します。
+
 署名のcanonical formは次の改行区切りです。
 
 ```text

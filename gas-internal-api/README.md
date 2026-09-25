@@ -21,6 +21,8 @@ Webアプリdeploymentは次の条件にします。
 
 deploymentを外部公開する前に、対象Spreadsheetの読み取り、Drive権限メタデータ、必要なGoogle Groupメンバー参照だけが許可されていることを確認してください。Spreadsheetへの書き込み処理はありません。
 
+`SpreadsheetApp.openById()` はApps Scriptの仕様上 `spreadsheets` scopeを要求するため、manifestにはこのscopeを明示します。scope自体は書き込み権限を含みますが、このAPIの実装と回帰テストはSpreadsheetへの書き込みメソッドを禁止しています。
+
 ## キャッシュ更新
 
 必要に応じて `refreshCalendarAggregateCache` を1分間隔の時間主導トリガーで実行します。社員認可は各APIリクエストでSpreadsheet共有権限を再取得するため、既存sessionが残っていても共有解除後の次回アクセスは拒否されます。

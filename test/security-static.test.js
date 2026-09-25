@@ -59,6 +59,14 @@ test('new Apps Script project is API-only, HMACs email policy, blocks direct GET
   assert.doesNotMatch(gas, /\.setValue\(|\.setValues\(|\.appendRow\(|\.deleteRow\(|\.insertRow/);
 });
 
+test('Apps Script manifest grants the scope required by SpreadsheetApp without write code', () => {
+  const manifest = JSON.parse(read('gas-internal-api/appsscript.json'));
+  assert.ok(manifest.oauthScopes.includes('https://www.googleapis.com/auth/spreadsheets'));
+  assert.equal(manifest.oauthScopes.includes('https://www.googleapis.com/auth/spreadsheets.readonly'), false);
+  const gas = read('gas-internal-api/Code.js');
+  assert.doesNotMatch(gas, /\.setValue\(|\.setValues\(|\.appendRow\(|\.deleteRow\(|\.insertRow/);
+});
+
 test('Vercel production code contains no logging of employee or customer data', () => {
   const apiFiles = fs.readdirSync(path.join(root, 'api'), { recursive: true })
     .filter((file) => String(file).endsWith('.js'))
@@ -67,4 +75,3 @@ test('Vercel production code contains no logging of employee or customer data', 
   assert.doesNotMatch(apiFiles, /console\.(log|info|warn|error)/);
   assert.doesNotMatch(apiFiles, /JSON\.stringify\([^)]*(session|email|customer|content)/i);
 });
-
