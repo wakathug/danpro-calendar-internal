@@ -67,11 +67,18 @@ test('Apps Script manifest grants the scope required by SpreadsheetApp without w
   assert.doesNotMatch(gas, /\.setValue\(|\.setValues\(|\.appendRow\(|\.deleteRow\(|\.insertRow/);
 });
 
-test('Vercel production code contains no logging of employee or customer data', () => {
+test('Vercel production logging is limited to safe OAuth callback stage codes', () => {
+  const callbackPath = path.normalize('auth/callback.js');
   const apiFiles = fs.readdirSync(path.join(root, 'api'), { recursive: true })
-    .filter((file) => String(file).endsWith('.js'))
+    .filter((file) => String(file).endsWith('.js'));
+  const callback = read(path.join('api', callbackPath));
+  const otherApi = apiFiles
+    .filter((file) => path.normalize(String(file)) !== callbackPath)
     .map((file) => read(path.join('api', String(file))))
     .join('\n');
-  assert.doesNotMatch(apiFiles, /console\.(log|info|warn|error)/);
-  assert.doesNotMatch(apiFiles, /JSON\.stringify\([^)]*(session|email|customer|content)/i);
+  assert.doesNotMatch(otherApi, /console\.(log|info|warn|error)/);
+  assert.equal((callback.match(/console\.error/g) || []).length, 1);
+  assert.doesNotMatch(callback, /console\.(log|info|warn)/);
+  assert.match(callback, /console\.error\(JSON\.stringify\(\{[\s\S]*?event: 'oauth_callback_failed',[\s\S]*?oauth_callback_stage:[\s\S]*?error_code: safeCode,[\s\S]*?\}\)\)/);
+  assert.doesNotMatch(callback, /JSON\.stringify\([^)]*(session|email|customer|content|token|codeVerifier)/i);
 });

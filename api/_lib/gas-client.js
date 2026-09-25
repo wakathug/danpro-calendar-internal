@@ -11,6 +11,14 @@ export class GasAccessDeniedError extends Error {
   }
 }
 
+export class GasUpstreamError extends Error {
+  constructor(safeCode = 'upstream_error') {
+    super('Apps Script request failed');
+    this.name = 'GasUpstreamError';
+    this.safeCode = safeCode;
+  }
+}
+
 export function createSignedGasRequest({ action, email, body = {}, now = Date.now(), nonce = randomToken(24), secret }) {
   if (!ACTIONS.has(action)) throw new Error('Unsupported Apps Script action');
   const normalizedEmail = normalizeEmail(email);
@@ -39,24 +47,30 @@ export async function callGas(action, email, body = {}, options = {}) {
     body,
     secret: config.gasSigningSecret,
   });
-  const response = await fetch(config.gasApiUrl, {
-    method: 'POST',
-    redirect: 'follow',
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify(signed),
-    signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
-  });
+  let response;
+  try {
+    response = await fetch(config.gasApiUrl, {
+      method: 'POST',
+      redirect: 'follow',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify(signed),
+      signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
+    });
+  } catch (error) {
+    const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+    throw new GasUpstreamError(timedOut ? 'timeout' : 'network_error');
+  }
   let payload;
   try {
     payload = await response.json();
   } catch {
-    throw new Error('Apps Script returned an invalid response');
+    throw new GasUpstreamError(response.ok ? 'invalid_json' : `http_${response.status}`);
   }
   if (response.status === 403 || payload?.error === 'ACCESS_DENIED') {
     throw new GasAccessDeniedError();
   }
   if (!response.ok || payload?.ok !== true) {
-    throw new Error('Apps Script request failed');
+    throw new GasUpstreamError(!response.ok ? `http_${response.status}` : 'invalid_payload');
   }
   return payload.data;
 }
@@ -71,4 +85,3 @@ export function isFreshGasTimestamp(timestamp, now = Date.now()) {
   const parsed = Number(timestamp) * 1000;
   return Number.isFinite(parsed) && Math.abs(now - parsed) <= MAX_CLOCK_SKEW_MS;
 }
-

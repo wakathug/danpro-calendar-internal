@@ -68,6 +68,36 @@ test('PKCE uses S256 and a failed verifier exchange is rejected', async () => {
   assert.equal(posted.get('grant_type'), 'authorization_code');
 });
 
+test('callback logs only a safe stage and provider code when token exchange fails', async () => {
+  const flow = await createAuthFlow();
+  const binding = /__Host-danpro_oauth=([^;]+)/.exec(flow.cookie)[1];
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    error: 'invalid_grant',
+    error_description: 'must never be logged',
+  }), {
+    status: 400,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const messages = [];
+  const originalConsoleError = console.error;
+  console.error = (message) => messages.push(String(message));
+  try {
+    const response = mockResponse();
+    await callbackHandler(mockRequest({
+      headers: { cookie: `${OAUTH_COOKIE}=${binding}` },
+      query: { state: flow.state, code: 'valid-authorization-code' },
+    }), response);
+    assert.equal(response.statusCode, 401);
+    assert.equal(response.json().error, 'LOGIN_FAILED');
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /"oauth_callback_stage":"token_exchange_failed"/);
+  assert.match(messages[0], /"error_code":"invalid_grant"/);
+  assert.doesNotMatch(messages[0], /authorization-code|must never be logged|__Host|@/i);
+});
+
 test('OIDC claim validation rejects nonce, issuer, audience, expiry, and unverified email', () => {
   const now = 2_000_000_000_000;
   const base = {
@@ -111,4 +141,3 @@ test('Google ID token with an invalid signature is rejected', async () => {
   const wrongKeySet = createLocalJWKSet({ keys: [verifierJwk] });
   await assert.rejects(() => verifyGoogleIdToken(token, 'nonce-value', { keySet: wrongKeySet }));
 });
-

@@ -9,6 +9,14 @@ export const GOOGLE_JWKS_URI = new URL('https://www.googleapis.com/oauth2/v3/cer
 
 let googleJwks;
 
+export class OAuthTokenExchangeError extends Error {
+  constructor(safeCode = 'token_exchange_error') {
+    super('OAuth code exchange failed');
+    this.name = 'OAuthTokenExchangeError';
+    this.safeCode = safeCode;
+  }
+}
+
 function getGoogleJwks() {
   if (!googleJwks) googleJwks = createRemoteJWKSet(GOOGLE_JWKS_URI);
   return googleJwks;
@@ -47,7 +55,10 @@ export async function exchangeAuthorizationCode(code, codeVerifier) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok || typeof payload?.id_token !== 'string') {
-    throw new Error('OAuth code exchange failed');
+    const providerCode = typeof payload?.error === 'string' && /^[a-z0-9_.-]{1,64}$/i.test(payload.error)
+      ? payload.error.toLowerCase()
+      : `http_${response.status}`;
+    throw new OAuthTokenExchangeError(providerCode);
   }
   return payload.id_token;
 }
@@ -79,4 +90,3 @@ export async function verifyGoogleIdToken(idToken, expectedNonce, options = {}) 
   });
   return validateGoogleClaims(payload, expectedNonce, config.googleClientId, options.now ?? Date.now());
 }
-
