@@ -98,15 +98,17 @@ test('Apps Script manifest grants the scope required by SpreadsheetApp without w
   assert.doesNotMatch(gas, /\.setValue\(|\.setValues\(|\.appendRow\(|\.deleteRow\(|\.insertRow/);
 });
 
-test('Vercel production logging is limited to safe OAuth callback stage codes', () => {
+test('Vercel production logging is limited to safe OAuth stage codes and timings', () => {
   const callbackPath = path.normalize('auth/callback.js');
+  const loginPath = path.normalize('auth/login.js');
   const apiFiles = fs.readdirSync(path.join(root, 'api'), { recursive: true })
     .filter((file) => String(file).endsWith('.js'));
   const callback = read(path.join('api', callbackPath));
+  const login = read(path.join('api', loginPath));
   const performancePath = path.normalize('_lib/performance.js');
   const performanceLogger = read(path.join('api', performancePath));
   const otherApi = apiFiles
-    .filter((file) => ![callbackPath, performancePath].includes(path.normalize(String(file))))
+    .filter((file) => ![callbackPath, loginPath, performancePath].includes(path.normalize(String(file))))
     .map((file) => read(path.join('api', String(file))))
     .join('\n');
   assert.doesNotMatch(otherApi, /console\.(log|info|warn|error)/);
@@ -114,6 +116,12 @@ test('Vercel production logging is limited to safe OAuth callback stage codes', 
   assert.doesNotMatch(callback, /console\.(log|info|warn)/);
   assert.match(callback, /console\.error\(JSON\.stringify\(\{[\s\S]*?event: 'oauth_callback_failed',[\s\S]*?oauth_callback_stage:[\s\S]*?error_code: safeCode,[\s\S]*?\}\)\)/);
   assert.doesNotMatch(callback, /JSON\.stringify\([^)]*(session|email|customer|content|token|codeVerifier)/i);
+  assert.equal((login.match(/console\.error/g) || []).length, 1);
+  assert.doesNotMatch(login, /console\.(log|info|warn)/);
+  assert.match(login, /event: 'auth_login_failed'/);
+  assert.match(login, /auth_login_stage: `\$\{stage\}_failed`/);
+  assert.match(login, /error_code: safeLoginErrorCode\(error, stage\)/);
+  assert.doesNotMatch(login, /JSON\.stringify\([^)]*(session|email|customer|content|token|secret)/i);
   assert.equal((performanceLogger.match(/console\.info/g) || []).length, 2);
   assert.match(performanceLogger, /event: 'performance_timing'/);
   assert.match(performanceLogger, /event: 'gas_internal_timing'/);
