@@ -59,16 +59,31 @@ function doGet() {
  * @return {GoogleAppsScript.Content.TextOutput}
  */
 function doPost(event) {
+  const requestStartedAt = Date.now();
+  const requestTiming = { requestStartedAt };
   try {
     const request = parseSignedRequest_(event);
     verifySignedRequest_(request);
+    requestTiming.hmacVerificationMs = Date.now() - requestStartedAt;
+    const permissionStartedAt = Date.now();
     verifyEmployeeAccessFresh_(request.email);
+    requestTiming.employeePermissionCheckMs = Date.now() - permissionStartedAt;
+    requestTiming.permissionCheckCompletedMs = Date.now() - requestStartedAt;
 
     if (request.action === 'authorize') {
-      return createJsonOutput_({ ok: true, data: { authorized: true } });
+      return createJsonOutput_({
+        ok: true,
+        data: {
+          authorized: true,
+          serverTiming: finalizeRequestTiming_(requestTiming),
+        },
+      });
     }
     if (request.action === 'calendar') {
-      return createJsonOutput_({ ok: true, data: getInternalApiCalendarData_() });
+      return createJsonOutput_({
+        ok: true,
+        data: getInternalApiCalendarData_(requestTiming),
+      });
     }
     if (request.action === 'dayDetails') {
       return createJsonOutput_({
@@ -197,8 +212,9 @@ function createJsonOutput_(payload) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function getInternalApiCalendarData_() {
-  const timing = createCalendarTiming_();
+function getInternalApiCalendarData_(requestTiming) {
+  const timing = createCalendarTiming_(requestTiming);
+  const aggregateStartedAt = Date.now();
   let cached = null;
   try {
     cached = parseCachedCalendarAggregate_(
@@ -207,15 +223,12 @@ function getInternalApiCalendarData_() {
   } catch (error) {
     cached = null;
   }
+  timing.calendarAggregateReadMs = Date.now() - aggregateStartedAt;
+  timing.serverCacheLookupCompletedMs = Date.now() - timing.startedAt;
   if (cached) {
     return attachCalendarTiming_(buildCachedCalendarResponse_(cached), timing, true);
   }
-  const spreadsheet = openSpreadsheet_(timing);
-  const result = buildFreshCalendarData_(spreadsheet, timing, true);
-  timing.spreadsheetFetchCompletedMs = Date.now() - timing.startedAt;
-  cacheCalendarAggregate_(result);
-  delete result.sheetId;
-  return attachCalendarTiming_(result, timing, false);
+  throw new Error('calendar aggregate cache unavailable');
 }
 
 function getInternalApiDayDetails_(dateKey, expectedRevision) {
@@ -285,13 +298,19 @@ function refreshCalendarAggregateCache() {
   }
 }
 
-function createCalendarTiming_() {
+function createCalendarTiming_(requestTiming) {
+  const requestStartedAt = requestTiming && Number.isFinite(requestTiming.requestStartedAt)
+    ? requestTiming.requestStartedAt
+    : Date.now();
   return {
-    startedAt: Date.now(),
-    permissionCheckCompletedMs: null,
+    startedAt: requestStartedAt,
+    hmacVerificationMs: requestTiming && requestTiming.hmacVerificationMs || 0,
+    employeePermissionCheckMs: requestTiming && requestTiming.employeePermissionCheckMs || 0,
+    permissionCheckCompletedMs: requestTiming && requestTiming.permissionCheckCompletedMs || null,
     activeUserLookupMs: 0,
     accessCacheLookupMs: 0,
     serverCacheLookupCompletedMs: null,
+    calendarAggregateReadMs: 0,
     spreadsheetFetchCompletedMs: null,
     cacheHit: false,
     spreadsheetOpenMs: 0,
@@ -302,6 +321,15 @@ function createCalendarTiming_() {
     aggregationMs: 0,
     revisionMs: 0,
     detailCacheWriteMs: 0,
+  };
+}
+
+function finalizeRequestTiming_(requestTiming) {
+  return {
+    hmacVerificationMs: requestTiming.hmacVerificationMs || 0,
+    employeePermissionCheckMs: requestTiming.employeePermissionCheckMs || 0,
+    permissionCheckCompletedMs: requestTiming.permissionCheckCompletedMs || null,
+    totalMs: Date.now() - requestTiming.requestStartedAt,
   };
 }
 

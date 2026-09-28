@@ -1,5 +1,6 @@
 import { normalizeEmail, randomToken, sha256 } from './crypto.js';
 import { parseCookies, secureCookie, clearCookie } from './http.js';
+import { elapsedMs, startTimer } from './performance.js';
 import { storeDelete, storeGet, storeSet } from './store.js';
 
 export const SESSION_COOKIE = '__Host-danpro_session';
@@ -28,10 +29,12 @@ export async function createSession(email, now = Date.now()) {
   };
 }
 
-export async function readSession(req, now = Date.now()) {
+export async function readSession(req, now = Date.now(), timing = null) {
   const sessionId = parseCookies(req)[SESSION_COOKIE];
   if (!SESSION_ID_PATTERN.test(sessionId ?? '')) return null;
+  const storeStartedAt = startTimer();
   const session = await storeGet(sessionKey(sessionId));
+  if (timing) timing.upstash = elapsedMs(storeStartedAt);
   if (
     !session
     || session.version !== 1
@@ -61,4 +64,3 @@ export async function deleteRequestSession(req) {
 export function clearSessionCookie() {
   return clearCookie(SESSION_COOKIE);
 }
-

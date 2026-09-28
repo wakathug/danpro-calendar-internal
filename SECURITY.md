@@ -51,7 +51,7 @@ Spreadsheet共有権限から作る許可メール値は、Apps Script Script Pr
 
 - Vercel社員API: `Cache-Control: private, no-store, max-age=0`
 - Vercel CDN共有キャッシュ: 使用禁止
-- localStorage: `date / count / level / symbol / levels / updatedAt`だけ
+- localStorage: `date / count / level / symbol / levels / updatedAt`だけ。サーバー側HMACの匿名`userCacheKey`で社員ごとに分離
 - localStorage表示: `/api/auth/session` が現在の社員権限を確認した後だけ
 - 客先名、商品名、工程詳細、period: ブラウザーmemory cacheだけ
 - logout、401、403: localStorage表示キャッシュとmemory詳細キャッシュを削除

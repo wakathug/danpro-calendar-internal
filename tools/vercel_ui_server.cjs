@@ -7,6 +7,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..', 'public');
 const port = Number(process.env.DANPRO_PREVIEW_PORT || 8766);
 const authenticated = process.env.DANPRO_PREVIEW_AUTH !== 'false';
+const userCacheKey = 'A'.repeat(43);
 const symbols = ['◎', '○', '△', '×'];
 const labels = ['余裕あり', '対応可能', 'やや混雑', '混雑'];
 const weekendCounts = new Map([[5, 0], [6, 0], [12, 1], [13, 3], [19, 5], [20, 2], [26, 4], [27, 6]]);
@@ -42,7 +43,24 @@ http.createServer((request, response) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
   if (url.pathname === '/api/auth/session') {
     return authenticated
-      ? json(response, 200, { authenticated: true })
+      ? json(response, 200, { authenticated: true, userCacheKey })
+      : json(response, 401, { authenticated: false });
+  }
+  if (url.pathname === '/api/bootstrap') {
+    return authenticated
+      ? json(response, 200, {
+        ok: true,
+        authenticated: true,
+        userCacheKey,
+        data: {
+          days,
+          levels: symbols.map((symbol, level) => ({ level, symbol, label: labels[level] })),
+          updatedAt: '2026-09-25T03:34:56.000Z',
+          detailRevision: 'local-preview-revision',
+          timeZone: 'Asia/Tokyo',
+          spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/local-preview/edit?gid=123',
+        },
+      })
       : json(response, 401, { authenticated: false });
   }
   if (url.pathname === '/api/calendar') {

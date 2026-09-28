@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import calendarHandler from '../api/calendar.js';
+import bootstrapHandler from '../api/bootstrap.js';
 import logoutHandler from '../api/auth/logout.js';
 import sessionHandler from '../api/auth/session.js';
 import { createSession, SESSION_COOKIE } from '../api/_lib/session.js';
@@ -60,7 +61,8 @@ test('authorized employee session and calendar requests return 200 with no share
   const sessionResponse = mockResponse();
   await sessionHandler(mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }), sessionResponse);
   assert.equal(sessionResponse.statusCode, 200);
-  assert.deepEqual(sessionResponse.json(), { authenticated: true });
+  assert.equal(sessionResponse.json().authenticated, true);
+  assert.match(sessionResponse.json().userCacheKey, /^[A-Za-z0-9_-]{43}$/);
 
   const calendarResponse = mockResponse();
   await calendarHandler(mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }), calendarResponse);
@@ -68,6 +70,31 @@ test('authorized employee session and calendar requests return 200 with no share
   assert.equal(calendarResponse.json().ok, true);
   assert.equal(calendarResponse.getHeader('cache-control'), 'private, no-store, max-age=0');
   assert.equal(calendarResponse.getHeader('cache-control').includes('s-maxage'), false);
+});
+
+test('bootstrap reads the session once and returns only anonymous identity plus calendar summary', async () => {
+  const created = await createSession('employee@example.com', Date.now());
+  let sessionReads = 0;
+  const originalGet = store.get.bind(store);
+  store.get = async (key) => {
+    if (String(key).startsWith('session:v1:')) sessionReads += 1;
+    return originalGet(key);
+  };
+  globalThis.fetch = async () => gasResponse({
+    ok: true,
+    data: { days: [], levels: [], updatedAt: '2026-09-25T00:00:00.000Z' },
+  });
+
+  const response = mockResponse();
+  await bootstrapHandler(mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }), response);
+  assert.equal(response.statusCode, 200);
+  assert.equal(sessionReads, 1);
+  assert.equal(response.json().authenticated, true);
+  assert.match(response.json().userCacheKey, /^[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual(response.json().data.days, []);
+  assert.equal(response.getHeader('cache-control'), 'private, no-store, max-age=0');
+  assert.match(response.getHeader('server-timing'), /upstash;dur=/);
+  assert.doesNotMatch(response.body, /employee@example\.com|session:v1:/);
 });
 
 test('permission removal invalidates an existing server-side session on next check', async () => {

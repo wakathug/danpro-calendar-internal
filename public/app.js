@@ -3,9 +3,13 @@
 
         const TIME_ZONE = 'Asia/Tokyo';
         const REFRESH_INTERVAL_MS = 60 * 1000;
+        const REFRESH_INDICATOR_DELAY_MS = 300;
         const HOVER_DELAY_MS = 250;
-        const CALENDAR_STORAGE_KEY = 'danpro-employee-calendar:v1';
+        const LEGACY_CALENDAR_STORAGE_KEY = 'danpro-employee-calendar:v1';
+        const CALENDAR_STORAGE_PREFIX = 'danpro-employee-calendar:v2:';
+        const ACTIVE_USER_STORAGE_KEY = 'danpro-employee-calendar-active:v2';
         const CALENDAR_STORAGE_TTL_MS = 24 * 60 * 60 * 1000;
+        const USER_CACHE_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
         const ERROR_CODES = Object.freeze({
           accessDenied: 'ACCESS_DENIED',
           unauthenticated: 'UNAUTHENTICATED',
@@ -21,15 +25,22 @@
         const LEVEL_SYMBOLS = ['◎', '○', '△', '×'];
         const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
         const hoverCapable = window.matchMedia('(hover: hover) and (pointer: fine)');
-        const startupTimingOrigin = window.performance && typeof window.performance.now === 'function'
-          ? window.performance.now()
-          : 0;
+        const startupTimingOrigin = 0;
         const startupTiming = {
-          htmlDisplayStartedMs: 0,
+          htmlDisplayStartedMs: window.performance && typeof window.performance.now === 'function'
+            ? Math.round(window.performance.now() * 10) / 10
+            : 0,
+          authSessionStartedMs: null,
+          authSessionCompletedMs: null,
+          calendarApiStartedMs: null,
+          jsonReceivedMs: null,
+          calendarRenderedMs: null,
+          spinnerStoppedMs: null,
           cachedCalendarRenderedMs: null,
           getCalendarDataStartedMs: null,
           getCalendarDataCompletedMs: null,
           latestCalendarRenderedMs: null,
+          vercelTiming: {},
           serverTiming: null,
         };
         window.__danproCalendarTiming = startupTiming;
@@ -44,6 +55,7 @@
           monthTitle: document.getElementById('month-title'),
           statusText: document.getElementById('status-text'),
           spinner: document.getElementById('spinner'),
+          refreshStatus: document.getElementById('refresh-status'),
           error: document.getElementById('error'),
           legend: document.getElementById('legend'),
           previousMonth: document.getElementById('previous-month'),
@@ -73,16 +85,26 @@
         let lastFocusedElement = null;
         let activeModalDate = null;
         let sessionConfirmed = false;
+        let cacheUserKey = null;
         let refreshTimer = 0;
+        let refreshIndicatorTimer = 0;
         const detailCache = new Map();
         const detailPending = new Map();
 
         async function fetchJson(url, options = {}) {
+          const timingGroup = options.timingGroup;
+          const fetchOptions = { ...options };
+          delete fetchOptions.timingGroup;
           const response = await fetch(url, {
             credentials: 'same-origin',
-            headers: { Accept: 'application/json', ...(options.headers || {}) },
-            ...options,
+            headers: { Accept: 'application/json', ...(fetchOptions.headers || {}) },
+            ...fetchOptions,
           });
+          if (timingGroup) {
+            startupTiming.vercelTiming[timingGroup] = parseServerTiming(
+              response.headers.get('Server-Timing'),
+            );
+          }
           const payload = await response.json().catch(() => null);
           if (!response.ok) {
             const code = response.status === 401
@@ -95,8 +117,18 @@
           return payload;
         }
 
+        function parseServerTiming(value) {
+          const metrics = {};
+          String(value || '').split(',').forEach((entry) => {
+            const match = entry.trim().match(/^([a-z][a-zA-Z0-9]{0,63});dur=([0-9]+(?:\.[0-9]+)?)$/);
+            if (match) metrics[match[1]] = Number(match[2]);
+          });
+          return metrics;
+        }
+
         function clearEmployeeState() {
           clearCachedCalendar();
+          cacheUserKey = null;
           invalidateDetailCache();
           calendarData = new Map();
           hasLoadedSuccessfully = false;
@@ -140,6 +172,8 @@
             ? window.performance.now()
             : startupTimingOrigin;
           startupTiming[name] = Math.max(0, Math.round((current - startupTimingOrigin) * 10) / 10);
+          const attribute = name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+          document.documentElement.setAttribute(`data-performance-${attribute}`, String(startupTiming[name]));
         }
 
         function isValidDateKey(value) {
@@ -201,16 +235,30 @@
           }
         }
 
-        function restoreCachedCalendar() {
-          if (!sessionConfirmed) return false;
-          let cached = null;
+        function readCachedCalendarCandidate() {
           try {
-            cached = parseCachedCalendar(window.localStorage.getItem(CALENDAR_STORAGE_KEY));
-            if (!cached) window.localStorage.removeItem(CALENDAR_STORAGE_KEY);
+            const activeKey = window.localStorage.getItem(ACTIVE_USER_STORAGE_KEY);
+            if (!USER_CACHE_KEY_PATTERN.test(activeKey || '')) return null;
+            const cached = parseCachedCalendar(
+              window.localStorage.getItem(`${CALENDAR_STORAGE_PREFIX}${activeKey}`),
+            );
+            return cached ? { activeKey, cached } : null;
+          } catch (error) {
+            return null;
+          }
+        }
+
+        function restoreCachedCalendar(userCacheKey) {
+          if (!sessionConfirmed) return false;
+          if (!USER_CACHE_KEY_PATTERN.test(userCacheKey || '')) return false;
+          let candidate = null;
+          try {
+            candidate = readCachedCalendarCandidate();
+            if (!candidate || candidate.activeKey !== userCacheKey) return false;
           } catch (error) {
             return false;
           }
-          if (!cached) return false;
+          const cached = candidate.cached;
 
           chooseInitialMonth(cached.days);
           calendarData = new Map(cached.days.map((day) => [day.date, day]));
@@ -220,18 +268,25 @@
           renderCalendar();
           elements.statusText.textContent = `前回データを表示中 · ${formatUpdatedAt(cached.updatedAt)}`;
           markStartupTiming('cachedCalendarRenderedMs');
+          markStartupTiming('calendarRenderedMs');
           return true;
         }
 
         function clearCachedCalendar() {
           try {
-            window.localStorage.removeItem(CALENDAR_STORAGE_KEY);
+            const activeKey = cacheUserKey || window.localStorage.getItem(ACTIVE_USER_STORAGE_KEY);
+            if (USER_CACHE_KEY_PATTERN.test(activeKey || '')) {
+              window.localStorage.removeItem(`${CALENDAR_STORAGE_PREFIX}${activeKey}`);
+            }
+            window.localStorage.removeItem(ACTIVE_USER_STORAGE_KEY);
+            window.localStorage.removeItem(LEGACY_CALENDAR_STORAGE_KEY);
           } catch (error) {
             // Storage無効でも画面上の権限制御は継続します。
           }
         }
 
         function saveCachedCalendar(data) {
+          if (!USER_CACHE_KEY_PATTERN.test(cacheUserKey || '')) return;
           try {
             const days = data.days.map((day) => ({
               date: day.date,
@@ -244,13 +299,15 @@
               symbol: level.symbol,
               label: level.label,
             }));
-            window.localStorage.setItem(CALENDAR_STORAGE_KEY, JSON.stringify({
+            window.localStorage.setItem(`${CALENDAR_STORAGE_PREFIX}${cacheUserKey}`, JSON.stringify({
               version: 1,
               savedAt: Date.now(),
               days,
               levels,
               updatedAt: data.updatedAt,
             }));
+            window.localStorage.setItem(ACTIVE_USER_STORAGE_KEY, cacheUserKey);
+            window.localStorage.removeItem(LEGACY_CALENDAR_STORAGE_KEY);
           } catch (error) {
             // Storage無効・容量超過でも通常取得は継続します。
           }
@@ -372,13 +429,21 @@
         function setLoading(loading) {
           isLoading = loading;
           elements.calendarWrap.setAttribute('aria-busy', String(loading));
-          elements.spinner.hidden = !loading;
+          window.clearTimeout(refreshIndicatorTimer);
+          refreshIndicatorTimer = 0;
+          elements.refreshStatus.hidden = true;
+          const background = loading && hasLoadedSuccessfully;
+          elements.spinner.hidden = !loading || background;
           if (loading) {
-            elements.statusText.textContent = showingCachedCalendar
-              ? '前回データを表示中（更新中…）'
-              : hasLoadedSuccessfully
-                ? '更新中…'
-                : '読み込み中…';
+            if (background) {
+              refreshIndicatorTimer = window.setTimeout(() => {
+                if (isLoading && hasLoadedSuccessfully) elements.refreshStatus.hidden = false;
+              }, REFRESH_INDICATOR_DELAY_MS);
+            } else {
+              elements.statusText.textContent = '読み込み中…';
+            }
+          } else {
+            markStartupTiming('spinnerStoppedMs');
           }
         }
 
@@ -481,9 +546,10 @@
           renderLegend(levels);
           renderCalendar();
           saveCachedCalendar({ days, levels, updatedAt: data.updatedAt });
-          setLoading(false);
           startupTiming.serverTiming = data.serverTiming || null;
+          markStartupTiming('calendarRenderedMs');
           markStartupTiming('latestCalendarRenderedMs');
+          setLoading(false);
           if (startupTiming.latestCalendarRenderedMs !== null) {
             console.info('calendar startup timing', { ...startupTiming });
           }
@@ -523,8 +589,11 @@
           if (!sessionConfirmed || isLoading) return;
           setLoading(true);
           markStartupTiming('getCalendarDataStartedMs');
+          markStartupTiming('calendarApiStartedMs');
           try {
-            handleCalendarResponse(await fetchJson('/api/calendar'));
+            const response = await fetchJson('/api/calendar', { timingGroup: 'calendar' });
+            markStartupTiming('jsonReceivedMs');
+            handleCalendarResponse(response);
           } catch (error) {
             if (error && (error.code === ERROR_CODES.unauthenticated || error.code === ERROR_CODES.accessDenied)) {
               showLogin(error.code === ERROR_CODES.accessDenied
@@ -841,12 +910,45 @@
         async function boot() {
           renderLegend(FALLBACK_LEVELS);
           renderCalendar();
+          const cachedCandidate = readCachedCalendarCandidate();
+          setLoading(true);
           try {
-            const session = await fetchJson('/api/auth/session');
-            if (!session || session.authenticated !== true) throw { code: ERROR_CODES.unauthenticated };
-            showCalendar();
-            restoreCachedCalendar();
-            await refreshCalendar();
+            if (cachedCandidate) {
+              markStartupTiming('authSessionStartedMs');
+              markStartupTiming('calendarApiStartedMs');
+              markStartupTiming('getCalendarDataStartedMs');
+              const calendarPromise = fetchJson('/api/calendar', { timingGroup: 'calendar' });
+              const session = await fetchJson('/api/auth/session', { timingGroup: 'auth' });
+              markStartupTiming('authSessionCompletedMs');
+              if (
+                !session
+                || session.authenticated !== true
+                || !USER_CACHE_KEY_PATTERN.test(session.userCacheKey || '')
+              ) throw { code: ERROR_CODES.unauthenticated };
+              cacheUserKey = session.userCacheKey;
+              showCalendar();
+              const restored = restoreCachedCalendar(cacheUserKey);
+              if (restored) setLoading(false);
+              setLoading(true);
+              const response = await calendarPromise;
+              markStartupTiming('jsonReceivedMs');
+              handleCalendarResponse(response);
+            } else {
+              markStartupTiming('authSessionStartedMs');
+              markStartupTiming('calendarApiStartedMs');
+              markStartupTiming('getCalendarDataStartedMs');
+              const response = await fetchJson('/api/bootstrap', { timingGroup: 'bootstrap' });
+              markStartupTiming('authSessionCompletedMs');
+              markStartupTiming('jsonReceivedMs');
+              if (
+                !response
+                || response.authenticated !== true
+                || !USER_CACHE_KEY_PATTERN.test(response.userCacheKey || '')
+              ) throw { code: ERROR_CODES.unauthenticated };
+              cacheUserKey = response.userCacheKey;
+              showCalendar();
+              handleCalendarResponse(response);
+            }
             refreshTimer = window.setInterval(refreshCalendar, REFRESH_INTERVAL_MS);
           } catch (error) {
             showLogin(error && error.code === ERROR_CODES.accessDenied

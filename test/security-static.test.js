@@ -27,10 +27,13 @@ test('Vercel to GAS request is HMAC signed without sending the secret', () => {
 test('frontend has no inline executable content and waits for session before localStorage restore', () => {
   const html = read('public/index.html');
   const script = read('public/app.js');
+  const boot = script.slice(script.indexOf('async function boot()'));
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)/i);
   assert.doesNotMatch(html, /<style\b/i);
-  assert.ok(script.indexOf("fetchJson('/api/auth/session')") < script.indexOf('restoreCachedCalendar();'));
+  assert.ok(boot.indexOf("fetchJson('/api/auth/session'") < boot.indexOf('restoreCachedCalendar(cacheUserKey)'));
   assert.match(script, /if \(!sessionConfirmed\) return false/);
+  assert.match(script, /ACTIVE_USER_STORAGE_KEY/);
+  assert.match(script, /USER_CACHE_KEY_PATTERN/);
   assert.match(script, /function clearEmployeeState\(\)[\s\S]*clearCachedCalendar\(\)[\s\S]*invalidateDetailCache\(\)/);
   assert.doesNotMatch(script, /localStorage[\s\S]{0,120}(customer|content|period|email|token|session)/i);
 });
@@ -51,11 +54,19 @@ test('security headers are strict and employee APIs cannot be shared-cacheable',
 
 test('new Apps Script project is API-only, HMACs email policy, blocks direct GET, and has no writes', () => {
   const gas = read('gas-internal-api/Code.js');
+  const calendarRequestPath = gas.slice(
+    gas.indexOf('function getInternalApiCalendarData_'),
+    gas.indexOf('function getInternalApiDayDetails_'),
+  );
   assert.match(gas, /function doGet\(\)[\s\S]*METHOD_NOT_ALLOWED/);
   assert.doesNotMatch(gas, /HtmlService/);
   assert.match(gas, /computeHmacSha256Signature\([\s\S]*accessPolicyHmacSecretProperty/);
   assert.match(gas, /consumeNonce_\(request\.nonce\)/);
   assert.match(gas, /signatureClockSkewSeconds: 120/);
+  assert.match(gas, /hmacVerificationMs/);
+  assert.match(gas, /employeePermissionCheckMs/);
+  assert.match(gas, /calendarAggregateReadMs/);
+  assert.doesNotMatch(calendarRequestPath, /openSpreadsheet_|buildFreshCalendarData_|getRange\(/);
   assert.doesNotMatch(gas, /\.setValue\(|\.setValues\(|\.appendRow\(|\.deleteRow\(|\.insertRow/);
 });
 
@@ -76,8 +87,10 @@ test('Vercel production logging is limited to safe OAuth callback stage codes', 
   const apiFiles = fs.readdirSync(path.join(root, 'api'), { recursive: true })
     .filter((file) => String(file).endsWith('.js'));
   const callback = read(path.join('api', callbackPath));
+  const performancePath = path.normalize('_lib/performance.js');
+  const performanceLogger = read(path.join('api', performancePath));
   const otherApi = apiFiles
-    .filter((file) => path.normalize(String(file)) !== callbackPath)
+    .filter((file) => ![callbackPath, performancePath].includes(path.normalize(String(file))))
     .map((file) => read(path.join('api', String(file))))
     .join('\n');
   assert.doesNotMatch(otherApi, /console\.(log|info|warn|error)/);
@@ -85,4 +98,7 @@ test('Vercel production logging is limited to safe OAuth callback stage codes', 
   assert.doesNotMatch(callback, /console\.(log|info|warn)/);
   assert.match(callback, /console\.error\(JSON\.stringify\(\{[\s\S]*?event: 'oauth_callback_failed',[\s\S]*?oauth_callback_stage:[\s\S]*?error_code: safeCode,[\s\S]*?\}\)\)/);
   assert.doesNotMatch(callback, /JSON\.stringify\([^)]*(session|email|customer|content|token|codeVerifier)/i);
+  assert.equal((performanceLogger.match(/console\.info/g) || []).length, 1);
+  assert.match(performanceLogger, /event: 'performance_timing'/);
+  assert.doesNotMatch(performanceLogger, /email|sessionId|customer|content|token|secret/i);
 });

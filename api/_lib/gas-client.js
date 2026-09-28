@@ -1,5 +1,6 @@
 import { getConfig } from './config.js';
 import { hmacSha256, normalizeEmail, randomToken, sha256 } from './crypto.js';
+import { elapsedMs, startTimer } from './performance.js';
 
 const ACTIONS = new Set(['authorize', 'calendar', 'dayDetails']);
 const MAX_CLOCK_SKEW_MS = 2 * 60 * 1000;
@@ -40,6 +41,7 @@ export function createSignedGasRequest({ action, email, body = {}, now = Date.no
 }
 
 export async function callGas(action, email, body = {}, options = {}) {
+  const startedAt = startTimer();
   const config = getConfig();
   const signed = createSignedGasRequest({
     action,
@@ -56,7 +58,13 @@ export async function callGas(action, email, body = {}, options = {}) {
       body: JSON.stringify(signed),
       signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
     });
+    if (typeof options.onTiming === 'function') {
+      options.onTiming({ gasFetch: elapsedMs(startedAt) });
+    }
   } catch (error) {
+    if (typeof options.onTiming === 'function') {
+      options.onTiming({ gasFetch: elapsedMs(startedAt) });
+    }
     const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
     throw new GasUpstreamError(timedOut ? 'timeout' : 'network_error');
   }
@@ -66,17 +74,35 @@ export async function callGas(action, email, body = {}, options = {}) {
   } catch {
     throw new GasUpstreamError(response.ok ? 'invalid_json' : `http_${response.status}`);
   }
+  if (typeof options.onTiming === 'function') {
+    options.onTiming({ gasTotal: elapsedMs(startedAt) });
+  }
   if (response.status === 403 || payload?.error === 'ACCESS_DENIED') {
     throw new GasAccessDeniedError();
   }
   if (!response.ok || payload?.ok !== true) {
     throw new GasUpstreamError(!response.ok ? `http_${response.status}` : 'invalid_payload');
   }
+  if (typeof options.onTiming === 'function' && payload.data?.serverTiming) {
+    const reported = payload.data.serverTiming;
+    const safeReported = {};
+    const reportedMetrics = {
+      gasHmac: reported.hmacVerificationMs,
+      gasPermission: reported.employeePermissionCheckMs,
+      gasAggregate: reported.calendarAggregateReadMs,
+    };
+    for (const [name, value] of Object.entries(reportedMetrics)) {
+      if (Number.isFinite(value) && value >= 0 && value <= (options.timeoutMs ?? 30_000)) {
+        safeReported[name] = value;
+      }
+    }
+    options.onTiming(safeReported);
+  }
   return payload.data;
 }
 
-export async function authorizeEmployee(email) {
-  const data = await callGas('authorize', email);
+export async function authorizeEmployee(email, options = {}) {
+  const data = await callGas('authorize', email, {}, options);
   if (data?.authorized !== true) throw new GasAccessDeniedError();
   return true;
 }

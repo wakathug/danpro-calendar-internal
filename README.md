@@ -37,17 +37,23 @@ Spreadsheetから読み取った詳細表示対象データとsheetIdをSHA-256�
 
 ## 初期表示キャッシュと計測
 
-成功したカレンダーの`days`（date / count / level / symbol）、`levels`、`updatedAt`だけをブラウザーのlocalStorageへ最大24時間保存します。次回起動時はこれを先に描画し、直後に通常の`getCalendarData()`で最新データへ更新します。顧客名、商品名、工程詳細、period、Spreadsheet URL、detailRevisionは保存しません。アクセス拒否時は保存済みカレンダーと画面表示を消去します。
+成功したカレンダーの`days`（date / count / level / symbol）、`levels`、`updatedAt`だけをブラウザーのlocalStorageへ最大24時間保存します。保存キーは、サーバー側で社員メールを秘密鍵付きHMACへ変換した匿名`userCacheKey`で分離します。メール、session ID、顧客名、商品名、工程詳細、period、Spreadsheet URL、detailRevisionは保存しません。複数社員が同じブラウザーを使っても、現在のSpreadsheet権限確認を通過したユーザーと一致するキャッシュだけを表示し、logout、401、403では現在ユーザーの表示キャッシュを削除します。
+
+キャッシュがある通常アクセスでは`/api/auth/session`と`/api/calendar`を並列に開始し、GASで現在のSpreadsheet社員権限が確認できた時点でキャッシュを描画してspinnerを停止します。権限確認前の先行表示はしません。キャッシュがない初回アクセスでは`/api/bootstrap`がUpstash session lookupを1回だけ行い、authentication state、calendar summary、detailRevision、updatedAtをまとめて返します。すべての社員APIは`Cache-Control: private, no-store, max-age=0`を維持します。
+
+キャッシュ表示後のrevalidate中はspinnerを再表示せず、300msを超えた場合だけ「更新中…」を表示します。初回データがない場合は従来どおりspinnerを表示します。
 
 サーバーは候補シートごとにヘッダー行から最終行までを1つのRangeで一括取得し、その配列を最新シート判定、集計、詳細生成、detailRevision生成で再利用します。`getCalendarData()`の応答にはSpreadsheetオープン、Range読み取り、最新シート判定、集計、revision、詳細キャッシュ保存の各所要時間を`serverTiming`として含め、ブラウザー側は初期表示の各時点を`window.__danproCalendarTiming`とコンソールへ記録します。この計測値と顧客情報はlocalStorageへ保存しません。
 
-初回ブラウザー向けには、Apps ScriptのScript Cacheへ表示専用の事前集計を最大3分保存します。内容は`days`（date / count / level / symbol）、`levels`、更新時刻、対象sheetId、detailRevisionだけで、顧客名、商品名、工程詳細、period、Spreadsheet URLは含めません。カレンダーキャッシュがない、2分より古い、壊れている、またはCache Serviceが失敗した場合は、権限キャッシュで許可済みのユーザーに限って通常のSpreadsheet一括取得と集計へフォールバックします。
+Apps ScriptのScript Cacheへ表示専用の事前集計を最大3分保存します。内容は`days`（date / count / level / symbol）、`levels`、更新時刻、対象sheetId、detailRevisionだけで、顧客名、商品名、工程詳細、period、Spreadsheet URLは含めません。カレンダーキャッシュがない、2分より古い、壊れている、またはCache Serviceが失敗した場合、Web requestはSpreadsheet一括取得へフォールバックせず一時エラーにします。これによりSpreadsheet Range readと集計は初期表示のcritical pathへ入りません。
 
 アクセス権限は同じ時間主導更新でDrive APIから取得し、個別共有ユーザーと閲覧可能なGoogle Groupメンバーは正規化メールのSHA-256ハッシュ、ドメイン共有はドメイン条件としてScript Cacheへ180秒保存します。有効性は生成から150秒までに制限します。1分更新が遅延したり1回分ずれたりしても約120秒の更新間隔までは正規ユーザーの利用を継続でき、更新が止まった場合は生成から150秒を超えた時点で必ずfail-closedになります。Webリクエストでは`Session.getActiveUser().getEmail()`と権限キャッシュだけを照合するため、カレンダーキャッシュ命中時は`SpreadsheetApp.openById()`、Range読み取り、Drive API、Groups APIを呼びません。メールを取得できない場合、権限キャッシュがない・破損・期限切れの場合、または照合不一致の場合はSpreadsheetへフォールバックせず`ACCESS_DENIED`にします。`getDayDetails()`にも同じ照合を適用します。
 
 Drive権限の`user`、`group`、`domain`、`anyone`を区別します。Google Groupは直接メンバーの役割がOWNER、MANAGER、MEMBERのユーザーだけを許可し、子Groupを再帰的に展開します。ドメイン／全員共有は検索可能な権限だけを許可対象とし、「リンクを知っているユーザー」型の権限は安全側で許可リストへ展開しません。トリガー実行者がGroupメンバー一覧を閲覧できない場合や上限を超えた場合は権限キャッシュを更新せず、既存キャッシュも生成から150秒を超えると無効になるfail-closed方式です。Google側でGroupメンバー変更の反映に遅延がある場合、アプリはDrive／Groups APIで確認できた状態を次回トリガーで反映します。
 
-`serverTiming`には、Apps Script処理開始を基準とした`activeUserLookupMs`、`accessCacheLookupMs`、`permissionCheckCompletedMs`、`serverCacheLookupCompletedMs`、`spreadsheetFetchCompletedMs`、`cacheHit`を含めます。ブラウザーの`window.__danproCalendarTiming`にある`getCalendarDataStartedMs`と`latestCalendarRenderedMs`を合わせると、RPC開始から混雑記号描画までを確認できます。キャッシュ命中時の`spreadsheetOpenMs`とRange読み取り回数は0、`spreadsheetFetchCompletedMs`は`null`です。
+`serverTiming`には、Apps Script処理開始を基準とした`hmacVerificationMs`、`employeePermissionCheckMs`、`permissionCheckCompletedMs`、`calendarAggregateReadMs`、`serverCacheLookupCompletedMs`、`spreadsheetFetchCompletedMs`、`cacheHit`を含めます。Vercel Functionは`Server-Timing`と安全な構造化ログに`upstash`、`gasFetch`、`gasTotal`、`total`を記録します。ブラウザーの`window.__danproCalendarTiming`にはHTML表示、session開始・完了、calendar API開始、JSON受信、cache/latest描画、spinner停止を記録します。ログやTimingにはsecret、email、session ID、顧客情報を含めません。
+
+Vercel Functionsは`vercel.json`の`regions: ["hnd1"]`でTokyoへ固定し、Node.js runtimeのまま実行します。
 
 ## 事前集計トリガー（本番では手動設定）
 
