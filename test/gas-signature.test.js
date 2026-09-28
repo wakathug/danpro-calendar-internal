@@ -14,6 +14,7 @@ const accessSecret = 'gas-contract-access-secret-that-is-long-enough';
 
 function createContext() {
   const cache = new Map();
+  let groupLookups = 0;
   const properties = new Map([
     ['INTERNAL_GAS_SIGNING_SECRET', signingSecret],
     ['ACCESS_POLICY_HMAC_SECRET', accessSecret],
@@ -64,6 +65,26 @@ function createContext() {
         return { tryLock: () => true, releaseLock() {} };
       },
     },
+    Drive: {
+      Permissions: {
+        list() {
+          return {
+            permissions: [{
+              type: 'user',
+              role: 'reader',
+              emailAddress: 'employee@example.com',
+            }],
+          };
+        },
+      },
+    },
+    GroupsApp: {
+      Role: { OWNER: 'OWNER', MANAGER: 'MANAGER', MEMBER: 'MEMBER' },
+      getGroupByEmail() {
+        groupLookups += 1;
+        throw new Error('unexpected group lookup');
+      },
+    },
     ContentService: {
       MimeType: { JSON: 'application/json' },
       createTextOutput(text) {
@@ -77,6 +98,7 @@ function createContext() {
   };
   vm.createContext(context);
   vm.runInContext(source, context, { filename: 'Code.js' });
+  context.getGroupLookups = () => groupLookups;
   return context;
 }
 
@@ -143,3 +165,41 @@ test('direct Apps Script GET reveals no employee data and access hashes use keye
   assert.notEqual(digest, plain);
 });
 
+test('detailed Apps Script timings are exclusive and zero-group policies skip GroupsApp', () => {
+  const context = createContext();
+  const timing = context.createInternalRequestTiming_(Date.now() - 50);
+  const policy = context.buildSpreadsheetAccessPolicy_(timing);
+  assert.equal(context.getGroupLookups(), 0);
+  assert.equal(timing.groupExpansionMs, 0);
+  assert.ok(timing.drivePermissionsReadMs >= 0);
+  assert.ok(timing.accessPolicyBuildMs >= 0);
+  assert.equal(context.isEmailAllowedByPolicy_('employee@example.com', policy.policy), true);
+
+  const output = context.createTimedJsonOutput_({ ok: true, data: { authorized: true } }, timing);
+  const internal = JSON.parse(output.text).data.internalTiming;
+  const exclusiveKeys = [
+    'requestParseMs',
+    'timestampValidationMs',
+    'signingSecretReadMs',
+    'bodyDigestMs',
+    'hmacComputeMs',
+    'signatureCompareMs',
+    'nonceLockWaitMs',
+    'nonceLookupMs',
+    'nonceWriteMs',
+    'drivePermissionsReadMs',
+    'groupExpansionMs',
+    'accessPolicyBuildMs',
+    'employeeMembershipMatchMs',
+    'calendarAggregateReadMs',
+    'responseSerializeMs',
+  ];
+  assert.deepEqual(Object.keys(internal).sort(), [
+    ...exclusiveKeys,
+    'gasAppTotalMs',
+    'gasUnattributedMs',
+  ].sort());
+  const exclusiveTotal = exclusiveKeys.reduce((sum, key) => sum + internal[key], 0);
+  assert.equal(internal.gasUnattributedMs, internal.gasAppTotalMs - exclusiveTotal);
+  assert.ok(internal.gasUnattributedMs >= 0);
+});

@@ -62,7 +62,7 @@ test('new Apps Script project is API-only, HMACs email policy, blocks direct GET
   assert.match(gas, /function doGet\(\)[\s\S]*METHOD_NOT_ALLOWED/);
   assert.doesNotMatch(gas, /HtmlService/);
   assert.match(gas, /computeHmacSha256Signature\([\s\S]*accessPolicyHmacSecretProperty/);
-  assert.match(gas, /consumeNonce_\(request\.nonce\)/);
+  assert.match(gas, /consumeNonce_\(request\.nonce, internalTiming\)/);
   assert.match(gas, /signatureClockSkewSeconds: 120/);
   assert.match(gas, /hmacVerificationMs/);
   assert.match(gas, /employeePermissionCheckMs/);
@@ -104,7 +104,8 @@ test('Vercel production logging is limited to safe OAuth callback stage codes', 
   assert.doesNotMatch(callback, /console\.(log|info|warn)/);
   assert.match(callback, /console\.error\(JSON\.stringify\(\{[\s\S]*?event: 'oauth_callback_failed',[\s\S]*?oauth_callback_stage:[\s\S]*?error_code: safeCode,[\s\S]*?\}\)\)/);
   assert.doesNotMatch(callback, /JSON\.stringify\([^)]*(session|email|customer|content|token|codeVerifier)/i);
-  assert.equal((performanceLogger.match(/console\.info/g) || []).length, 1);
+  assert.equal((performanceLogger.match(/console\.info/g) || []).length, 2);
   assert.match(performanceLogger, /event: 'performance_timing'/);
+  assert.match(performanceLogger, /event: 'gas_internal_timing'/);
   assert.doesNotMatch(performanceLogger, /email|sessionId|customer|content|token|secret/i);
 });

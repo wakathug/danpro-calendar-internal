@@ -33,3 +33,14 @@ export function logPerformance(route, status, metrics) {
     ...safeMetrics(metrics),
   }));
 }
+
+export function logGasInternalTiming(action, metrics) {
+  const safeAction = ['authorize', 'calendar', 'dayDetails'].includes(action)
+    ? action
+    : 'unknown';
+  console.info(JSON.stringify({
+    event: 'gas_internal_timing',
+    action: safeAction,
+    ...safeMetrics(metrics),
+  }));
+}

@@ -1,9 +1,28 @@
 import { getConfig } from './config.js';
 import { hmacSha256, normalizeEmail, randomToken, sha256 } from './crypto.js';
-import { elapsedMs, startTimer } from './performance.js';
+import { elapsedMs, logGasInternalTiming, startTimer } from './performance.js';
 
 const ACTIONS = new Set(['authorize', 'calendar', 'dayDetails']);
 const MAX_CLOCK_SKEW_MS = 2 * 60 * 1000;
+const INTERNAL_TIMING_METRICS = Object.freeze([
+  'requestParseMs',
+  'timestampValidationMs',
+  'signingSecretReadMs',
+  'bodyDigestMs',
+  'hmacComputeMs',
+  'signatureCompareMs',
+  'nonceLockWaitMs',
+  'nonceLookupMs',
+  'nonceWriteMs',
+  'drivePermissionsReadMs',
+  'groupExpansionMs',
+  'accessPolicyBuildMs',
+  'employeeMembershipMatchMs',
+  'calendarAggregateReadMs',
+  'responseSerializeMs',
+  'gasAppTotalMs',
+  'gasUnattributedMs',
+]);
 
 export class GasAccessDeniedError extends Error {
   constructor() {
@@ -50,6 +69,7 @@ export async function callGas(action, email, body = {}, options = {}) {
     secret: config.gasSigningSecret,
   });
   let response;
+  let gasFetchMs;
   try {
     response = await fetch(config.gasApiUrl, {
       method: 'POST',
@@ -58,9 +78,8 @@ export async function callGas(action, email, body = {}, options = {}) {
       body: JSON.stringify(signed),
       signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
     });
-    if (typeof options.onTiming === 'function') {
-      options.onTiming({ gasFetch: elapsedMs(startedAt) });
-    }
+    gasFetchMs = elapsedMs(startedAt);
+    if (typeof options.onTiming === 'function') options.onTiming({ gasFetch: gasFetchMs });
   } catch (error) {
     if (typeof options.onTiming === 'function') {
       options.onTiming({ gasFetch: elapsedMs(startedAt) });
@@ -82,6 +101,28 @@ export async function callGas(action, email, body = {}, options = {}) {
   }
   if (!response.ok || payload?.ok !== true) {
     throw new GasUpstreamError(!response.ok ? `http_${response.status}` : 'invalid_payload');
+  }
+  const internalTiming = payload.data?.internalTiming;
+  if (payload.data && Object.prototype.hasOwnProperty.call(payload.data, 'internalTiming')) {
+    delete payload.data.internalTiming;
+  }
+  const safeInternalTiming = {};
+  for (const name of INTERNAL_TIMING_METRICS) {
+    const value = internalTiming?.[name];
+    if (Number.isFinite(value) && value >= 0 && value <= (options.timeoutMs ?? 30_000)) {
+      safeInternalTiming[name] = Math.round(value * 10) / 10;
+    }
+  }
+  if (INTERNAL_TIMING_METRICS.every((name) => Object.hasOwn(safeInternalTiming, name))) {
+    const gasTransportAndPlatformMs = Math.max(
+      0,
+      Math.round((gasFetchMs - safeInternalTiming.gasAppTotalMs) * 10) / 10,
+    );
+    logGasInternalTiming(action, {
+      gasFetchMs,
+      gasTransportAndPlatformMs,
+      ...safeInternalTiming,
+    });
   }
   if (typeof options.onTiming === 'function' && payload.data?.serverTiming) {
     const reported = payload.data.serverTiming;

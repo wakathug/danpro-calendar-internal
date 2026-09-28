@@ -39,6 +39,29 @@ function gasResponse(payload) {
   });
 }
 
+function detailedGasTiming(overrides = {}) {
+  return {
+    requestParseMs: 1,
+    timestampValidationMs: 1,
+    signingSecretReadMs: 1,
+    bodyDigestMs: 1,
+    hmacComputeMs: 1,
+    signatureCompareMs: 1,
+    nonceLockWaitMs: 1,
+    nonceLookupMs: 1,
+    nonceWriteMs: 1,
+    drivePermissionsReadMs: 1,
+    groupExpansionMs: 0,
+    accessPolicyBuildMs: 1,
+    employeeMembershipMatchMs: 1,
+    calendarAggregateReadMs: 1,
+    responseSerializeMs: 1,
+    gasAppTotalMs: 20,
+    gasUnattributedMs: 7,
+    ...overrides,
+  };
+}
+
 test('unauthenticated employee API is 401 and never contacts Apps Script', async () => {
   let fetchCalls = 0;
   globalThis.fetch = async () => { fetchCalls += 1; throw new Error('unexpected'); };
@@ -95,6 +118,50 @@ test('bootstrap reads the session once and returns only anonymous identity plus 
   assert.equal(response.getHeader('cache-control'), 'private, no-store, max-age=0');
   assert.match(response.getHeader('server-timing'), /upstash;dur=/);
   assert.doesNotMatch(response.body, /employee@example\.com|session:v1:/);
+});
+
+test('detailed GAS timing is logged server-side and removed from browser responses', async () => {
+  const created = await createSession('employee@example.com', Date.now());
+  const originalInfo = console.info;
+  const messages = [];
+  console.info = (message) => messages.push(String(message));
+  globalThis.fetch = async () => gasResponse({
+    ok: true,
+    data: {
+      days: [],
+      levels: [],
+      updatedAt: '2026-09-25T00:00:00.000Z',
+      serverTiming: {
+        hmacVerificationMs: 9,
+        employeePermissionCheckMs: 8,
+        calendarAggregateReadMs: 1,
+      },
+      internalTiming: detailedGasTiming(),
+    },
+  });
+
+  try {
+    const response = mockResponse();
+    await calendarHandler(
+      mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }),
+      response,
+    );
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().data.internalTiming, undefined);
+    assert.doesNotMatch(response.body, /requestParseMs|gasAppTotalMs|employee@example\.com/);
+    assert.doesNotMatch(response.getHeader('server-timing'), /requestParse|gasAppTotal/);
+  } finally {
+    console.info = originalInfo;
+  }
+
+  const timingLog = messages.map((message) => JSON.parse(message))
+    .find((message) => message.event === 'gas_internal_timing');
+  assert.ok(timingLog);
+  assert.equal(timingLog.action, 'calendar');
+  assert.equal(timingLog.hmacComputeMs, 1);
+  assert.equal(timingLog.groupExpansionMs, 0);
+  assert.ok(timingLog.gasTransportAndPlatformMs >= 0);
+  assert.doesNotMatch(JSON.stringify(timingLog), /employee@example\.com|session:v1:/);
 });
 
 test('permission removal invalidates an existing server-side session on next check', async () => {

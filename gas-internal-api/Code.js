@@ -48,6 +48,24 @@ const SAFE_ERROR_CODES = Object.freeze({
   dataFetchFailed: 'DATA_FETCH_FAILED',
 });
 
+const INTERNAL_EXCLUSIVE_TIMING_KEYS = Object.freeze([
+  'requestParseMs',
+  'timestampValidationMs',
+  'signingSecretReadMs',
+  'bodyDigestMs',
+  'hmacComputeMs',
+  'signatureCompareMs',
+  'nonceLockWaitMs',
+  'nonceLookupMs',
+  'nonceWriteMs',
+  'drivePermissionsReadMs',
+  'groupExpansionMs',
+  'accessPolicyBuildMs',
+  'employeeMembershipMatchMs',
+  'calendarAggregateReadMs',
+  'responseSerializeMs',
+]);
+
 /** API専用deploymentです。GETで社員情報を返しません。 */
 function doGet() {
   return createJsonOutput_({ ok: false, error: 'METHOD_NOT_ALLOWED' });
@@ -61,38 +79,41 @@ function doGet() {
 function doPost(event) {
   const requestStartedAt = Date.now();
   const requestTiming = { requestStartedAt };
+  const internalTiming = createInternalRequestTiming_(requestStartedAt);
   try {
+    const parseStartedAt = Date.now();
     const request = parseSignedRequest_(event);
-    verifySignedRequest_(request);
+    internalTiming.requestParseMs = Date.now() - parseStartedAt;
+    verifySignedRequest_(request, internalTiming);
     requestTiming.hmacVerificationMs = Date.now() - requestStartedAt;
     const permissionStartedAt = Date.now();
-    verifyEmployeeAccessFresh_(request.email);
+    verifyEmployeeAccessFresh_(request.email, internalTiming);
     requestTiming.employeePermissionCheckMs = Date.now() - permissionStartedAt;
     requestTiming.permissionCheckCompletedMs = Date.now() - requestStartedAt;
 
     if (request.action === 'authorize') {
-      return createJsonOutput_({
+      return createTimedJsonOutput_({
         ok: true,
         data: {
           authorized: true,
           serverTiming: finalizeRequestTiming_(requestTiming),
         },
-      });
+      }, internalTiming);
     }
     if (request.action === 'calendar') {
-      return createJsonOutput_({
+      return createTimedJsonOutput_({
         ok: true,
-        data: getInternalApiCalendarData_(requestTiming),
-      });
+        data: getInternalApiCalendarData_(requestTiming, internalTiming),
+      }, internalTiming);
     }
     if (request.action === 'dayDetails') {
-      return createJsonOutput_({
+      return createTimedJsonOutput_({
         ok: true,
         data: getInternalApiDayDetails_(
           request.body && request.body.date,
           request.body && request.body.expectedRevision,
         ),
-      });
+      }, internalTiming);
     }
     return createJsonOutput_({ ok: false, error: 'INVALID_REQUEST' });
   } catch (error) {
@@ -138,25 +159,34 @@ function parseSignedRequest_(event) {
   return request;
 }
 
-function verifySignedRequest_(request) {
+function verifySignedRequest_(request, internalTiming) {
+  const timestampStartedAt = Date.now();
   const timestampMs = Number(request.timestamp) * 1000;
   if (
     !Number.isFinite(timestampMs)
     || Math.abs(Date.now() - timestampMs) > CALENDAR_CONFIG.signatureClockSkewSeconds * 1000
   ) throw new Error('expired signed request');
+  recordInternalTiming_(internalTiming, 'timestampValidationMs', Date.now() - timestampStartedAt);
 
+  const secretStartedAt = Date.now();
   const properties = PropertiesService.getScriptProperties();
   const secret = properties.getProperty(CALENDAR_CONFIG.signingSecretProperty);
+  recordInternalTiming_(internalTiming, 'signingSecretReadMs', Date.now() - secretStartedAt);
   if (typeof secret !== 'string' || secret.length < 32) {
     throw new Error('signing is not configured');
   }
+  const digestStartedAt = Date.now();
   const bodyJson = JSON.stringify(request.body);
   const actualBodyHash = base64Url_(Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
     bodyJson,
     Utilities.Charset.UTF_8,
   ));
-  if (!constantTimeEqual_(actualBodyHash, request.bodyHash)) {
+  recordInternalTiming_(internalTiming, 'bodyDigestMs', Date.now() - digestStartedAt);
+  const bodyCompareStartedAt = Date.now();
+  const bodyHashMatches = constantTimeEqual_(actualBodyHash, request.bodyHash);
+  recordInternalTiming_(internalTiming, 'signatureCompareMs', Date.now() - bodyCompareStartedAt);
+  if (!bodyHashMatches) {
     throw new Error('invalid body hash');
   }
   const canonical = [
@@ -167,25 +197,38 @@ function verifySignedRequest_(request) {
     request.email,
     request.bodyHash,
   ].join('\n');
-  const expectedSignature = base64Url_(Utilities.computeHmacSha256Signature(
+  const hmacStartedAt = Date.now();
+  const expectedSignatureBytes = Utilities.computeHmacSha256Signature(
     canonical,
     secret,
     Utilities.Charset.UTF_8,
-  ));
-  if (!constantTimeEqual_(expectedSignature, request.signature)) {
+  );
+  recordInternalTiming_(internalTiming, 'hmacComputeMs', Date.now() - hmacStartedAt);
+  const signatureCompareStartedAt = Date.now();
+  const expectedSignature = base64Url_(expectedSignatureBytes);
+  const signatureMatches = constantTimeEqual_(expectedSignature, request.signature);
+  recordInternalTiming_(internalTiming, 'signatureCompareMs', Date.now() - signatureCompareStartedAt);
+  if (!signatureMatches) {
     throw new Error('invalid signature');
   }
-  consumeNonce_(request.nonce);
+  consumeNonce_(request.nonce, internalTiming);
 }
 
-function consumeNonce_(nonce) {
+function consumeNonce_(nonce, internalTiming) {
   const key = `${CALENDAR_CONFIG.nonceCachePrefix}${nonce}`;
   const lock = LockService.getScriptLock();
+  const lockStartedAt = Date.now();
   if (!lock.tryLock(5000)) throw new Error('nonce lock unavailable');
+  recordInternalTiming_(internalTiming, 'nonceLockWaitMs', Date.now() - lockStartedAt);
   try {
+    const lookupStartedAt = Date.now();
     const cache = CacheService.getScriptCache();
-    if (cache.get(key)) throw new Error('replayed request');
+    const replayed = Boolean(cache.get(key));
+    recordInternalTiming_(internalTiming, 'nonceLookupMs', Date.now() - lookupStartedAt);
+    if (replayed) throw new Error('replayed request');
+    const writeStartedAt = Date.now();
     cache.put(key, '1', CALENDAR_CONFIG.nonceCacheTtlSeconds);
+    recordInternalTiming_(internalTiming, 'nonceWriteMs', Date.now() - writeStartedAt);
   } finally {
     lock.releaseLock();
   }
@@ -212,7 +255,58 @@ function createJsonOutput_(payload) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function getInternalApiCalendarData_(requestTiming) {
+function createTimedJsonOutput_(payload, internalTiming) {
+  // Measure the application payload before adding telemetry so serialization
+  // does not recursively include the timing envelope it is defining.
+  const serializationStartedAt = Date.now();
+  JSON.stringify(payload);
+  internalTiming.responseSerializeMs = Date.now() - serializationStartedAt;
+  internalTiming.gasAppTotalMs = Date.now() - internalTiming.requestStartedAt;
+  internalTiming.gasUnattributedMs = Math.max(
+    0,
+    internalTiming.gasAppTotalMs - sumExclusiveInternalTiming_(internalTiming),
+  );
+  if (payload && payload.ok === true && payload.data && typeof payload.data === 'object') {
+    payload.data.internalTiming = buildInternalTimingResponse_(internalTiming);
+  }
+  return createJsonOutput_(payload);
+}
+
+function createInternalRequestTiming_(requestStartedAt) {
+  const timing = { requestStartedAt };
+  INTERNAL_EXCLUSIVE_TIMING_KEYS.forEach((key) => {
+    timing[key] = 0;
+  });
+  timing.gasAppTotalMs = 0;
+  timing.gasUnattributedMs = 0;
+  return timing;
+}
+
+function recordInternalTiming_(timing, key, durationMs) {
+  if (!timing || !INTERNAL_EXCLUSIVE_TIMING_KEYS.includes(key)) return;
+  const duration = Number(durationMs);
+  if (!Number.isFinite(duration) || duration < 0) return;
+  timing[key] += duration;
+}
+
+function sumExclusiveInternalTiming_(timing) {
+  return INTERNAL_EXCLUSIVE_TIMING_KEYS.reduce((sum, key) => {
+    const value = Number(timing[key]);
+    return sum + (Number.isFinite(value) && value >= 0 ? value : 0);
+  }, 0);
+}
+
+function buildInternalTimingResponse_(timing) {
+  const result = {};
+  INTERNAL_EXCLUSIVE_TIMING_KEYS.forEach((key) => {
+    result[key] = timing[key];
+  });
+  result.gasAppTotalMs = timing.gasAppTotalMs;
+  result.gasUnattributedMs = timing.gasUnattributedMs;
+  return result;
+}
+
+function getInternalApiCalendarData_(requestTiming, internalTiming) {
   const timing = createCalendarTiming_(requestTiming);
   const aggregateStartedAt = Date.now();
   let cached = null;
@@ -224,6 +318,7 @@ function getInternalApiCalendarData_(requestTiming) {
     cached = null;
   }
   timing.calendarAggregateReadMs = Date.now() - aggregateStartedAt;
+  internalTiming.calendarAggregateReadMs = timing.calendarAggregateReadMs;
   timing.serverCacheLookupCompletedMs = Date.now() - timing.startedAt;
   if (cached) {
     return attachCalendarTiming_(buildCachedCalendarResponse_(cached), timing, true);
@@ -257,11 +352,18 @@ function getInternalApiDayDetails_(dateKey, expectedRevision) {
   };
 }
 
-function verifyEmployeeAccessFresh_(email) {
+function verifyEmployeeAccessFresh_(email, internalTiming) {
   const normalizedEmail = normalizeEmail_(email);
   if (!normalizedEmail) throw new Error('access denied');
-  const accessPolicyResult = buildSpreadsheetAccessPolicy_();
-  if (!isEmailAllowedByPolicy_(normalizedEmail, accessPolicyResult.policy)) {
+  const accessPolicyResult = buildSpreadsheetAccessPolicy_(internalTiming);
+  const membershipStartedAt = Date.now();
+  const allowed = isEmailAllowedByPolicy_(normalizedEmail, accessPolicyResult.policy);
+  recordInternalTiming_(
+    internalTiming,
+    'employeeMembershipMatchMs',
+    Date.now() - membershipStartedAt,
+  );
+  if (!allowed) {
     throw new Error('access denied');
   }
 }
@@ -601,8 +703,11 @@ function hashEmail_(email) {
   return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, '');
 }
 
-function buildSpreadsheetAccessPolicy_() {
-  const permissions = listSpreadsheetPermissions_();
+function buildSpreadsheetAccessPolicy_(internalTiming) {
+  const policyStartedAt = Date.now();
+  const driveBefore = internalTiming ? internalTiming.drivePermissionsReadMs : 0;
+  const groupBefore = internalTiming ? internalTiming.groupExpansionMs : 0;
+  const permissions = listSpreadsheetPermissions_(internalTiming);
   const allowedEmails = new Set();
   const allowedDomains = new Set();
   const visitedGroups = new Set();
@@ -620,7 +725,13 @@ function buildSpreadsheetAccessPolicy_() {
       const groupEmail = normalizeEmail_(permission.emailAddress);
       if (!groupEmail) throw new Error('invalid Google Group permission');
       groupPermissionCount += 1;
+      const groupStartedAt = Date.now();
       addGoogleGroupMembers_(groupEmail, allowedEmails, visitedGroups);
+      recordInternalTiming_(
+        internalTiming,
+        'groupExpansionMs',
+        Date.now() - groupStartedAt,
+      );
       return;
     }
     if (permission.type === 'domain') {
@@ -642,6 +753,15 @@ function buildSpreadsheetAccessPolicy_() {
     allowAnyAuthenticated,
   };
   if (!isValidAccessPolicy_(policy)) throw new Error('access policy validation failed');
+  if (internalTiming) {
+    const driveDuration = internalTiming.drivePermissionsReadMs - driveBefore;
+    const groupDuration = internalTiming.groupExpansionMs - groupBefore;
+    recordInternalTiming_(
+      internalTiming,
+      'accessPolicyBuildMs',
+      Math.max(0, Date.now() - policyStartedAt - driveDuration - groupDuration),
+    );
+  }
   return {
     policy,
     stats: {
@@ -652,7 +772,8 @@ function buildSpreadsheetAccessPolicy_() {
   };
 }
 
-function listSpreadsheetPermissions_() {
+function listSpreadsheetPermissions_(internalTiming) {
+  const startedAt = Date.now();
   const permissions = [];
   let pageToken;
   do {
@@ -666,6 +787,7 @@ function listSpreadsheetPermissions_() {
     (page.permissions || []).forEach((permission) => permissions.push(permission));
     pageToken = page.nextPageToken;
   } while (pageToken);
+  recordInternalTiming_(internalTiming, 'drivePermissionsReadMs', Date.now() - startedAt);
   return permissions;
 }
 
