@@ -2,6 +2,22 @@ import { Redis } from '@upstash/redis';
 
 let redisClient;
 
+const UPDATE_SESSION_AUTHORIZATION_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return -1 end
+local ok, session = pcall(cjson.decode, raw)
+if not ok or type(session) ~= 'table' then return -2 end
+local candidate = tonumber(ARGV[1])
+local current = tonumber(session.lastAuthorizedAt) or 0
+if not candidate then return -2 end
+if candidate > current then
+  session.lastAuthorizedAt = candidate
+  redis.call('SET', KEYS[1], cjson.encode(session), 'KEEPTTL')
+  current = candidate
+end
+return current
+`;
+
 function getRedis() {
   if (globalThis.__DANPRO_TEST_STORE__) return globalThis.__DANPRO_TEST_STORE__;
   if (redisClient) return redisClient;
@@ -22,6 +38,14 @@ export async function storeSet(key, value, ttlSeconds) {
 
 export async function storeDelete(key) {
   return getRedis().del(key);
+}
+
+export async function storeUpdateSessionAuthorization(key, authorizationStartedAt) {
+  return getRedis().eval(
+    UPDATE_SESSION_AUTHORIZATION_SCRIPT,
+    [key],
+    [String(authorizationStartedAt)],
+  );
 }
 
 export async function storeConsume(key) {
@@ -51,4 +75,3 @@ export async function storeIncrement(key, ttlSeconds) {
 export function resetStoreForTests() {
   redisClient = undefined;
 }
-

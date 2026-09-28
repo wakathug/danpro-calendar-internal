@@ -17,6 +17,19 @@ export class MemoryStore {
     return value;
   }
   async expire() { return 1; }
+  async eval(_script, keys, args) {
+    const key = keys[0];
+    const candidate = Number(args[0]);
+    const session = this.values.get(key);
+    if (!session) return -1;
+    if (!Number.isFinite(candidate) || typeof session !== 'object') return -2;
+    const current = Number.isFinite(session.lastAuthorizedAt) ? session.lastAuthorizedAt : 0;
+    if (candidate > current) {
+      this.values.set(key, structuredClone({ ...session, lastAuthorizedAt: candidate }));
+      return candidate;
+    }
+    return current;
+  }
   multi() {
     const operations = [];
     const self = this;
@@ -64,4 +77,3 @@ export function mockResponse() {
     json() { return this.body ? JSON.parse(this.body) : null; },
   };
 }
-

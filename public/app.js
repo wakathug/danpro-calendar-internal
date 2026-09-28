@@ -2,7 +2,8 @@
         'use strict';
 
         const TIME_ZONE = 'Asia/Tokyo';
-        const REFRESH_INTERVAL_MS = 60 * 1000;
+        const REFRESH_INTERVAL_MS = 45 * 1000;
+        const AUTHORIZATION_GRACE_MS = 60 * 1000;
         const REFRESH_INDICATOR_DELAY_MS = 300;
         const HOVER_DELAY_MS = 250;
         const LEGACY_CALENDAR_STORAGE_KEY = 'danpro-employee-calendar:v1';
@@ -88,6 +89,11 @@
         let cacheUserKey = null;
         let refreshTimer = 0;
         let refreshIndicatorTimer = 0;
+        let authorizationExpiryTimer = 0;
+        let authorizationDeadlineMs = 0;
+        let authorizationRequestSequence = 0;
+        let authorizationOutcomeSequence = 0;
+        let detailsAuthorized = false;
         const detailCache = new Map();
         const detailPending = new Map();
 
@@ -127,6 +133,8 @@
         }
 
         function clearEmployeeState() {
+          clearAuthorizationDeadline();
+          detailsAuthorized = false;
           clearCachedCalendar();
           cacheUserKey = null;
           invalidateDetailCache();
@@ -138,6 +146,102 @@
           closeDetails();
           hideSourceLink();
           renderCalendar();
+        }
+
+        function nowPerformanceMs() {
+          return window.performance && typeof window.performance.now === 'function'
+            ? window.performance.now()
+            : 0;
+        }
+
+        function beginAuthorizationRequest() {
+          authorizationRequestSequence += 1;
+          return {
+            sequence: authorizationRequestSequence,
+            startedAtMs: nowPerformanceMs(),
+          };
+        }
+
+        function clearAuthorizationDeadline() {
+          window.clearTimeout(authorizationExpiryTimer);
+          authorizationExpiryTimer = 0;
+          authorizationDeadlineMs = 0;
+        }
+
+        function authorizationRemainingMs() {
+          return Math.max(0, authorizationDeadlineMs - nowPerformanceMs());
+        }
+
+        function revokeDetails() {
+          detailsAuthorized = false;
+          invalidateDetailCache();
+          closeDetails();
+          hideSourceLink();
+          renderCalendar();
+        }
+
+        function failClosedSummary() {
+          clearAuthorizationDeadline();
+          revokeDetails();
+          calendarData = new Map();
+          hasLoadedSuccessfully = false;
+          showingCachedCalendar = false;
+          detailRevision = null;
+          elements.statusText.textContent = '社員権限を確認できません';
+          elements.error.textContent = '社員権限を確認できないため、カレンダーを非表示にしました。';
+          elements.error.hidden = false;
+          renderLegend(FALLBACK_LEVELS);
+          renderCalendar();
+          setLoading(false);
+        }
+
+        function scheduleAuthorizationExpiry(remainingMs) {
+          clearAuthorizationDeadline();
+          if (!(remainingMs > 0)) {
+            failClosedSummary();
+            return;
+          }
+          authorizationDeadlineMs = nowPerformanceMs() + remainingMs;
+          authorizationExpiryTimer = window.setTimeout(() => {
+            if (authorizationRemainingMs() > 0) {
+              scheduleAuthorizationExpiry(authorizationRemainingMs());
+              return;
+            }
+            failClosedSummary();
+          }, remainingMs);
+        }
+
+        function applyAuthorization(response, request, allowDetails) {
+          const authorization = response && response.authorization;
+          if (
+            !request
+            || !authorization
+            || !Number.isFinite(authorization.validForMs)
+            || authorization.validForMs <= 0
+            || authorization.validForMs > AUTHORIZATION_GRACE_MS
+            || request.sequence < authorizationOutcomeSequence
+          ) return false;
+          authorizationOutcomeSequence = request.sequence;
+          const elapsedMs = Math.max(0, nowPerformanceMs() - request.startedAtMs);
+          const remainingMs = Math.max(0, authorization.validForMs - elapsedMs);
+          if (!(remainingMs > 0)) return false;
+          scheduleAuthorizationExpiry(remainingMs);
+          detailsAuthorized = Boolean(allowDetails);
+          if (!detailsAuthorized) {
+            invalidateDetailCache();
+            closeDetails();
+            hideSourceLink();
+          }
+          renderCalendar();
+          return true;
+        }
+
+        function noteAuthorizationFailure(request) {
+          if (request && request.sequence < authorizationOutcomeSequence) return false;
+          if (request) authorizationOutcomeSequence = request.sequence;
+          revokeDetails();
+          if (authorizationRemainingMs() <= 0) failClosedSummary();
+          return true;
         }
 
         function showLogin(message = '') {
@@ -274,10 +378,12 @@
 
         function clearCachedCalendar() {
           try {
-            const activeKey = cacheUserKey || window.localStorage.getItem(ACTIVE_USER_STORAGE_KEY);
-            if (USER_CACHE_KEY_PATTERN.test(activeKey || '')) {
-              window.localStorage.removeItem(`${CALENDAR_STORAGE_PREFIX}${activeKey}`);
-            }
+            const activeKey = window.localStorage.getItem(ACTIVE_USER_STORAGE_KEY);
+            [cacheUserKey, activeKey].forEach((key) => {
+              if (USER_CACHE_KEY_PATTERN.test(key || '')) {
+                window.localStorage.removeItem(`${CALENDAR_STORAGE_PREFIX}${key}`);
+              }
+            });
             window.localStorage.removeItem(ACTIVE_USER_STORAGE_KEY);
             window.localStorage.removeItem(LEGACY_CALENDAR_STORAGE_KEY);
           } catch (error) {
@@ -362,10 +468,11 @@
             const isWeekend = weekday === 0 || weekday === 6;
             const count = item ? Number(item['count']) : 0;
             const isWorkingDay = Boolean(item) && (!isWeekend || count >= 1);
+            const canOpenDetails = isWorkingDay && detailsAuthorized;
 
-            const cell = document.createElement(isWorkingDay ? 'button' : 'div');
+            const cell = document.createElement(canOpenDetails ? 'button' : 'div');
             cell.className = 'day';
-            if (isWorkingDay) {
+            if (canOpenDetails) {
               cell.type = 'button';
               cell.classList.add('interactive');
               cell.dataset.date = key;
@@ -393,7 +500,9 @@
                 symbol.textContent = item.symbol || LEVEL_SYMBOLS[item.level];
                 cell.setAttribute(
                   'aria-label',
-                  `${year}年${month}月${day}日、${symbol.textContent} ${FALLBACK_LEVELS[item.level].label}。詳細を表示`,
+                  canOpenDetails
+                    ? `${year}年${month}月${day}日、${symbol.textContent} ${FALLBACK_LEVELS[item.level].label}。詳細を表示`
+                    : `${year}年${month}月${day}日、${symbol.textContent} ${FALLBACK_LEVELS[item.level].label}`,
                 );
               } else {
                 symbol.textContent = '—';
@@ -499,6 +608,10 @@
         }
 
         function showSourceLink(value) {
+          if (!detailsAuthorized) {
+            hideSourceLink();
+            return;
+          }
           try {
             const url = new URL(String(value || ''));
             if (
@@ -516,10 +629,18 @@
           }
         }
 
-        function handleCalendarResponse(response) {
+        function handleCalendarResponse(response, authorizationRequest) {
           markStartupTiming('getCalendarDataCompletedMs');
           if (!response || response.ok !== true || !response.data) {
-            handleCalendarError(getSafeErrorCode(response));
+            handleCalendarError(getSafeErrorCode(response), authorizationRequest);
+            return;
+          }
+          if (!applyAuthorization(response, authorizationRequest, true)) {
+            if (authorizationRequest.sequence < authorizationOutcomeSequence) {
+              setLoading(false);
+            } else {
+              handleCalendarFailure(authorizationRequest);
+            }
             return;
           }
 
@@ -556,7 +677,7 @@
           if (detailRevisionChanged) refreshOpenDetails();
         }
 
-        function handleCalendarError(code) {
+        function handleCalendarError(code, authorizationRequest) {
           const accessDenied = code === ERROR_CODES.accessDenied;
           if (accessDenied) {
             hideSourceLink();
@@ -568,6 +689,8 @@
             cancelHover();
             closeDetails();
             renderCalendar();
+          } else {
+            noteAuthorizationFailure(authorizationRequest);
           }
           elements.error.textContent = accessDenied
             ? 'このページを表示する権限がありません。\nダンプロスケジュールへのアクセス権限を確認してください。'
@@ -581,19 +704,20 @@
           setLoading(false);
         }
 
-        function handleCalendarFailure() {
-          handleCalendarError(ERROR_CODES.dataFetchFailed);
+        function handleCalendarFailure(authorizationRequest) {
+          handleCalendarError(ERROR_CODES.dataFetchFailed, authorizationRequest);
         }
 
         async function refreshCalendar() {
           if (!sessionConfirmed || isLoading) return;
+          const authorizationRequest = beginAuthorizationRequest();
           setLoading(true);
           markStartupTiming('getCalendarDataStartedMs');
           markStartupTiming('calendarApiStartedMs');
           try {
             const response = await fetchJson('/api/calendar', { timingGroup: 'calendar' });
             markStartupTiming('jsonReceivedMs');
-            handleCalendarResponse(response);
+            handleCalendarResponse(response, authorizationRequest);
           } catch (error) {
             if (error && (error.code === ERROR_CODES.unauthenticated || error.code === ERROR_CODES.accessDenied)) {
               showLogin(error.code === ERROR_CODES.accessDenied
@@ -601,21 +725,26 @@
                 : 'セッションの有効期限が切れました。もう一度ログインしてください。');
               return;
             }
-            handleCalendarFailure();
+            handleCalendarFailure(authorizationRequest);
           }
         }
 
         function loadDayDetails(dateKey) {
+          if (!detailsAuthorized) return Promise.reject({ code: ERROR_CODES.dataFetchFailed });
           if (detailCache.has(dateKey)) return Promise.resolve(detailCache.get(dateKey));
           if (detailPending.has(dateKey)) return detailPending.get(dateKey);
 
           const generation = detailGeneration;
           const requestedRevision = detailRevision;
+          const authorizationRequest = beginAuthorizationRequest();
           let request;
           request = fetchJson(`/api/day-details?date=${encodeURIComponent(dateKey)}&revision=${encodeURIComponent(requestedRevision || '')}`)
             .then((response) => {
                 if (!response || response.ok !== true || !response.data) {
                   throw { code: getSafeErrorCode(response) };
+                }
+                if (!applyAuthorization(response, authorizationRequest, true)) {
+                  throw { code: ERROR_CODES.dataFetchFailed };
                 }
                 const data = response.data;
                 if (generation !== detailGeneration) {
@@ -636,6 +765,8 @@
                 showLogin(error.code === ERROR_CODES.accessDenied
                   ? 'ダンプロスケジュールへのアクセス権限がありません。'
                   : 'セッションの有効期限が切れました。もう一度ログインしてください。');
+              } else {
+                noteAuthorizationFailure(authorizationRequest);
               }
               throw error;
             })
@@ -717,6 +848,7 @@
         }
 
         async function openDetails(dateKey, trigger) {
+          if (!detailsAuthorized) return;
           cancelHover();
           lastFocusedElement = trigger;
           activeModalDate = dateKey;
@@ -738,7 +870,7 @@
         }
 
         async function refreshOpenDetails() {
-          if (elements.detailBackdrop.hidden || !activeModalDate) return;
+          if (!detailsAuthorized || elements.detailBackdrop.hidden || !activeModalDate) return;
           const dateKey = activeModalDate;
           const requestToken = ++modalRequestToken;
           showDetailLoading();
@@ -826,7 +958,7 @@
         }
 
         function scheduleHover(dateKey, anchor) {
-          if (!hoverCapable.matches) return;
+          if (!hoverCapable.matches || !detailsAuthorized) return;
           window.clearTimeout(hoverTimer);
           const requestToken = ++hoverRequestToken;
           let settled = false;
@@ -915,9 +1047,7 @@
           try {
             if (cachedCandidate) {
               markStartupTiming('authSessionStartedMs');
-              markStartupTiming('calendarApiStartedMs');
-              markStartupTiming('getCalendarDataStartedMs');
-              const calendarPromise = fetchJson('/api/calendar', { timingGroup: 'calendar' });
+              const sessionAuthorizationRequest = beginAuthorizationRequest();
               const session = await fetchJson('/api/auth/session', { timingGroup: 'auth' });
               markStartupTiming('authSessionCompletedMs');
               if (
@@ -925,18 +1055,30 @@
                 || session.authenticated !== true
                 || !USER_CACHE_KEY_PATTERN.test(session.userCacheKey || '')
               ) throw { code: ERROR_CODES.unauthenticated };
+              if (!applyAuthorization(
+                session,
+                sessionAuthorizationRequest,
+                session.authorization && session.authorization.revalidated === true,
+              )) throw { code: ERROR_CODES.dataFetchFailed };
               cacheUserKey = session.userCacheKey;
               showCalendar();
               const restored = restoreCachedCalendar(cacheUserKey);
-              if (restored) setLoading(false);
-              setLoading(true);
-              const response = await calendarPromise;
-              markStartupTiming('jsonReceivedMs');
-              handleCalendarResponse(response);
+              if (restored) {
+                setLoading(false);
+                void refreshCalendar();
+              } else {
+                const calendarAuthorizationRequest = beginAuthorizationRequest();
+                markStartupTiming('calendarApiStartedMs');
+                markStartupTiming('getCalendarDataStartedMs');
+                const response = await fetchJson('/api/calendar', { timingGroup: 'calendar' });
+                markStartupTiming('jsonReceivedMs');
+                handleCalendarResponse(response, calendarAuthorizationRequest);
+              }
             } else {
               markStartupTiming('authSessionStartedMs');
               markStartupTiming('calendarApiStartedMs');
               markStartupTiming('getCalendarDataStartedMs');
+              const bootstrapAuthorizationRequest = beginAuthorizationRequest();
               const response = await fetchJson('/api/bootstrap', { timingGroup: 'bootstrap' });
               markStartupTiming('authSessionCompletedMs');
               markStartupTiming('jsonReceivedMs');
@@ -947,13 +1089,24 @@
               ) throw { code: ERROR_CODES.unauthenticated };
               cacheUserKey = response.userCacheKey;
               showCalendar();
-              handleCalendarResponse(response);
+              handleCalendarResponse(response, bootstrapAuthorizationRequest);
             }
             refreshTimer = window.setInterval(refreshCalendar, REFRESH_INTERVAL_MS);
           } catch (error) {
-            showLogin(error && error.code === ERROR_CODES.accessDenied
-              ? 'ダンプロスケジュールへのアクセス権限がありません。'
-              : 'Googleアカウントでログインしてください。');
+            if (error && (error.code === ERROR_CODES.unauthenticated || error.code === ERROR_CODES.accessDenied)) {
+              showLogin(error.code === ERROR_CODES.accessDenied
+                ? 'ダンプロスケジュールへのアクセス権限がありません。'
+                : 'Googleアカウントでログインしてください。');
+            } else {
+              clearAuthorizationDeadline();
+              revokeDetails();
+              sessionConfirmed = false;
+              elements.calendarPanel.hidden = true;
+              elements.loginPanel.hidden = false;
+              elements.loginError.textContent = '社員権限を確認できません。しばらくしてから再読み込みしてください。';
+              elements.loginError.hidden = false;
+              setLoading(false);
+            }
           }
         }
 

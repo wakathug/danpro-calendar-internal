@@ -2,9 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import calendarHandler from '../api/calendar.js';
 import bootstrapHandler from '../api/bootstrap.js';
+import dayDetailsHandler from '../api/day-details.js';
 import logoutHandler from '../api/auth/logout.js';
 import sessionHandler from '../api/auth/session.js';
-import { createSession, SESSION_COOKIE } from '../api/_lib/session.js';
+import {
+  createSession,
+  deleteSession,
+  readSession,
+  SESSION_COOKIE,
+  updateSessionAuthorization,
+} from '../api/_lib/session.js';
 import {
   configureTestEnvironment,
   MemoryStore,
@@ -69,6 +76,7 @@ test('unauthenticated employee API is 401 and never contacts Apps Script', async
   await calendarHandler(mockRequest(), response);
   assert.equal(response.statusCode, 401);
   assert.equal(response.json().error, 'UNAUTHENTICATED');
+  assert.match(response.getHeader('set-cookie'), /Max-Age=0/);
   assert.equal(fetchCalls, 0);
   assert.equal(response.getHeader('cache-control'), 'private, no-store, max-age=0');
 });
@@ -93,6 +101,120 @@ test('authorized employee session and calendar requests return 200 with no share
   assert.equal(calendarResponse.json().ok, true);
   assert.equal(calendarResponse.getHeader('cache-control'), 'private, no-store, max-age=0');
   assert.equal(calendarResponse.getHeader('cache-control').includes('s-maxage'), false);
+});
+
+test('59-second authorization grace validates the session without contacting Apps Script', async () => {
+  const now = 1_800_000_000_000;
+  const created = await createSession('employee@example.com', now - 5_000, {
+    lastAuthorizedAt: now - 59_000,
+  });
+  const originalDateNow = Date.now;
+  let fetchCalls = 0;
+  Date.now = () => now;
+  globalThis.fetch = async () => { fetchCalls += 1; throw new Error('unexpected GAS call'); };
+  try {
+    const response = mockResponse();
+    await sessionHandler(
+      mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }),
+      response,
+    );
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().authorization.revalidated, false);
+    assert.equal(response.json().authorization.validForMs, 1_000);
+    assert.doesNotMatch(response.body, /lastAuthorizedAt|employee@example\.com|session:v1:/);
+    assert.equal(response.getHeader('cache-control'), 'private, no-store, max-age=0');
+    assert.equal(fetchCalls, 0);
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
+test('authorization grace expires at 60 seconds and requires synchronous GAS authorization', async () => {
+  const now = 1_800_000_000_000;
+  const created = await createSession('employee@example.com', now - 5_000, {
+    lastAuthorizedAt: now - 60_000,
+  });
+  const originalDateNow = Date.now;
+  let fetchCalls = 0;
+  Date.now = () => now;
+  globalThis.fetch = async (_url, options) => {
+    fetchCalls += 1;
+    assert.equal(JSON.parse(options.body).action, 'authorize');
+    return gasResponse({ ok: true, data: { authorized: true } });
+  };
+  try {
+    const response = mockResponse();
+    await sessionHandler(
+      mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }),
+      response,
+    );
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().authorization.revalidated, true);
+    assert.equal(response.json().authorization.validForMs, 60_000);
+    assert.equal(fetchCalls, 1);
+    const stored = await readSession(
+      mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }),
+      now,
+    );
+    assert.equal(stored.session.lastAuthorizedAt, now);
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
+test('authorization timestamps only move forward and cannot recreate a deleted session', async () => {
+  const now = 1_800_000_000_000;
+  const created = await createSession('employee@example.com', now - 5_000, {
+    lastAuthorizedAt: now - 4_000,
+  });
+  assert.equal(await updateSessionAuthorization(created.sessionId, now - 1_000, now), now - 1_000);
+  assert.equal(await updateSessionAuthorization(created.sessionId, now - 3_000, now), now - 1_000);
+  const stored = await readSession(
+    mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }),
+    now,
+  );
+  assert.equal(stored.session.lastAuthorizedAt, now - 1_000);
+  await deleteSession(created.sessionId);
+  assert.equal(await updateSessionAuthorization(created.sessionId, now, now), null);
+  assert.equal(
+    [...store.values.keys()].filter((key) => key.startsWith('session:v1:')).length,
+    0,
+  );
+});
+
+test('GAS failure does not extend authorization and day details always performs synchronous GAS authorization', async () => {
+  const now = Date.now();
+  const created = await createSession('employee@example.com', now - 5_000, {
+    lastAuthorizedAt: now - 59_000,
+  });
+  const cookie = cookieHeader(created.cookie);
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: 'upstream' }), {
+    status: 500,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const failed = mockResponse();
+  await calendarHandler(mockRequest({ headers: { cookie } }), failed);
+  assert.equal(failed.statusCode, 503);
+  let stored = await readSession(mockRequest({ headers: { cookie } }), now);
+  assert.equal(stored.session.lastAuthorizedAt, now - 59_000);
+
+  let detailCalls = 0;
+  globalThis.fetch = async (_url, options) => {
+    detailCalls += 1;
+    assert.equal(JSON.parse(options.body).action, 'dayDetails');
+    return gasResponse({
+      ok: true,
+      data: { date: '2026-09-28', items: [], revision: 'revision-a' },
+    });
+  };
+  const details = mockResponse();
+  await dayDetailsHandler(mockRequest({
+    headers: { cookie },
+    query: { date: '2026-09-28', revision: 'revision-a' },
+  }), details);
+  assert.equal(details.statusCode, 200);
+  assert.equal(detailCalls, 1);
+  assert.equal(details.json().authorization.revalidated, true);
 });
 
 test('bootstrap reads the session once and returns only anonymous identity plus calendar summary', async () => {
@@ -176,9 +298,9 @@ test('permission removal invalidates an existing server-side session on next che
 
   globalThis.fetch = async () => gasResponse({ ok: false, error: 'ACCESS_DENIED' });
   const denied = mockResponse();
-  await sessionHandler(mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }), denied);
+  await calendarHandler(mockRequest({ headers: { cookie: cookieHeader(created.cookie) } }), denied);
   assert.equal(denied.statusCode, 403);
-  assert.equal(denied.json().authenticated, false);
+  assert.equal(denied.json().error.code, 'ACCESS_DENIED');
   const sessionId = cookieHeader(created.cookie).split('=')[1];
   const storedKeys = [...store.values.keys()].filter((key) => key.startsWith('session:v1:'));
   assert.equal(storedKeys.length, 0, `session ${sessionId.length} chars should be deleted`);

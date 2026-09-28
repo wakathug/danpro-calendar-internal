@@ -1,7 +1,13 @@
 import { callGas, GasAccessDeniedError } from './_lib/gas-client.js';
 import { queryValue, requireMethod, sendJson } from './_lib/http.js';
 import { checkRateLimit } from './_lib/rate-limit.js';
-import { clearSessionCookie, deleteSession, readSession } from './_lib/session.js';
+import {
+  authorizationResponse,
+  clearSessionCookie,
+  deleteSession,
+  readSession,
+  updateSessionAuthorization,
+} from './_lib/session.js';
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const REVISION_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -20,7 +26,9 @@ export default async function handler(req, res) {
   let current;
   try {
     current = await readSession(req);
-    if (!current) return sendJson(res, 401, { error: 'UNAUTHENTICATED' });
+    if (!current) return sendJson(res, 401, { error: 'UNAUTHENTICATED' }, {
+      'Set-Cookie': clearSessionCookie(),
+    });
     const date = queryValue(req, 'date');
     const revisionValue = queryValue(req, 'revision');
     if (!isValidDate(date)) return sendJson(res, 400, { error: 'INVALID_DATE' });
@@ -29,11 +37,25 @@ export default async function handler(req, res) {
     }
     const allowed = await checkRateLimit('day-details', current.sessionId, 180, 60);
     if (!allowed) return sendJson(res, 429, { error: 'RATE_LIMITED' });
+    const authorizationStartedAt = Date.now();
     const data = await callGas('dayDetails', current.session.email, {
       date,
       expectedRevision: revisionValue || '',
     });
-    sendJson(res, 200, { ok: true, data });
+    const lastAuthorizedAt = await updateSessionAuthorization(
+      current.sessionId,
+      authorizationStartedAt,
+    );
+    if (!lastAuthorizedAt) {
+      return sendJson(res, 401, { error: 'UNAUTHENTICATED' }, {
+        'Set-Cookie': clearSessionCookie(),
+      });
+    }
+    sendJson(res, 200, {
+      ok: true,
+      data,
+      authorization: authorizationResponse(lastAuthorizedAt),
+    });
   } catch (error) {
     if (error instanceof GasAccessDeniedError) {
       if (current) await deleteSession(current.sessionId).catch(() => {});

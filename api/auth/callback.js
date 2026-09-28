@@ -75,9 +75,12 @@ export default async function handler(req, res) {
     stage = 'id_token_verification';
     const identity = await verifyGoogleIdToken(idToken, flow.nonce);
     stage = 'employee_authorization';
+    const authorizationStartedAt = Date.now();
     await authorizeEmployee(identity.email);
     stage = 'session_creation';
-    const newSession = await createSession(identity.email);
+    const newSession = await createSession(identity.email, Date.now(), {
+      lastAuthorizedAt: authorizationStartedAt,
+    });
     stage = 'cookie_issue';
     redirect(res, '/', [clearFlowCookie, newSession.cookie]);
   } catch (error) {

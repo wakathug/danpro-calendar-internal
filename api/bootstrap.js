@@ -4,7 +4,13 @@ import { callGas, GasAccessDeniedError } from './_lib/gas-client.js';
 import { requireMethod, sendJson } from './_lib/http.js';
 import { elapsedMs, logPerformance, serverTiming, startTimer } from './_lib/performance.js';
 import { checkRateLimit } from './_lib/rate-limit.js';
-import { clearSessionCookie, deleteSession, readSession } from './_lib/session.js';
+import {
+  authorizationResponse,
+  clearSessionCookie,
+  deleteSession,
+  readSession,
+  updateSessionAuthorization,
+} from './_lib/session.js';
 
 function anonymousUserKey(email) {
   const normalized = normalizeEmail(email);
@@ -37,9 +43,22 @@ export default async function handler(req, res) {
         'Server-Timing': serverTiming(timing),
       });
     }
+    const authorizationStartedAt = Date.now();
     const data = await callGas('calendar', current.session.email, {}, {
       onTiming: (gasTiming) => Object.assign(timing, gasTiming),
     });
+    const lastAuthorizedAt = await updateSessionAuthorization(
+      current.sessionId,
+      authorizationStartedAt,
+    );
+    if (!lastAuthorizedAt) {
+      timing.total = elapsedMs(startedAt);
+      logPerformance('bootstrap', 401, timing);
+      return sendJson(res, 401, { authenticated: false }, {
+        'Set-Cookie': clearSessionCookie(),
+        'Server-Timing': serverTiming(timing),
+      });
+    }
     timing.total = elapsedMs(startedAt);
     logPerformance('bootstrap', 200, timing);
     sendJson(res, 200, {
@@ -47,6 +66,7 @@ export default async function handler(req, res) {
       authenticated: true,
       userCacheKey: anonymousUserKey(current.session.email),
       data,
+      authorization: authorizationResponse(lastAuthorizedAt),
     }, { 'Server-Timing': serverTiming(timing) });
   } catch (error) {
     timing.total = elapsedMs(startedAt);

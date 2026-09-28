@@ -35,6 +35,11 @@ test('frontend has no inline executable content and waits for session before loc
   assert.match(script, /ACTIVE_USER_STORAGE_KEY/);
   assert.match(script, /USER_CACHE_KEY_PATTERN/);
   assert.match(script, /function clearEmployeeState\(\)[\s\S]*clearCachedCalendar\(\)[\s\S]*invalidateDetailCache\(\)/);
+  assert.match(script, /let detailsAuthorized = false/);
+  assert.match(script, /if \(!detailsAuthorized\) return Promise\.reject/);
+  assert.match(script, /if \(!hoverCapable\.matches \|\| !detailsAuthorized\) return/);
+  assert.match(script, /function failClosedSummary\(\)[\s\S]*calendarData = new Map\(\)/);
+  assert.match(script, /authorization\.validForMs > AUTHORIZATION_GRACE_MS/);
   assert.doesNotMatch(script, /localStorage[\s\S]{0,120}(customer|content|period|email|token|session)/i);
 });
 
@@ -51,6 +56,9 @@ test('security headers are strict and employee APIs cannot be shared-cacheable',
   assert.match(read('api/_lib/http.js'), /private, no-store, max-age=0/);
   assert.doesNotMatch(read('api/_lib/http.js'), /s-maxage|stale-while-revalidate/);
   assert.equal(vercel.git.deploymentEnabled.main, false);
+  const store = read('api/_lib/store.js');
+  assert.match(store, /candidate > current/);
+  assert.match(store, /'KEEPTTL'/);
 });
 
 test('new Apps Script project is API-only, HMACs email policy, blocks direct GET, and has no writes', () => {

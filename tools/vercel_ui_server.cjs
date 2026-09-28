@@ -43,7 +43,11 @@ http.createServer((request, response) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
   if (url.pathname === '/api/auth/session') {
     return authenticated
-      ? json(response, 200, { authenticated: true, userCacheKey })
+      ? json(response, 200, {
+        authenticated: true,
+        userCacheKey,
+        authorization: { revalidated: false, validForMs: 59_000 },
+      })
       : json(response, 401, { authenticated: false });
   }
   if (url.pathname === '/api/bootstrap') {
@@ -52,6 +56,7 @@ http.createServer((request, response) => {
         ok: true,
         authenticated: true,
         userCacheKey,
+        authorization: { revalidated: true, validForMs: 58_000 },
         data: {
           days,
           levels: symbols.map((symbol, level) => ({ level, symbol, label: labels[level] })),
@@ -66,6 +71,7 @@ http.createServer((request, response) => {
   if (url.pathname === '/api/calendar') {
     return json(response, 200, {
       ok: true,
+      authorization: { revalidated: true, validForMs: 58_000 },
       data: {
         days,
         levels: symbols.map((symbol, level) => ({ level, symbol, label: labels[level] })),
@@ -79,6 +85,7 @@ http.createServer((request, response) => {
   if (url.pathname === '/api/day-details') {
     return json(response, 200, {
       ok: true,
+      authorization: { revalidated: true, validForMs: 58_000 },
       data: {
         date: url.searchParams.get('date'),
         items: [

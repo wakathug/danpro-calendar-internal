@@ -11,6 +11,7 @@
 5. Apps ScriptがHMAC、timestamp、nonce再利用を検証した後、Spreadsheet共有権限を再取得して社員権限を再確認
 6. 認可成功後にだけ最大7日のopaque session IDを発行し、Redisへsession本体を保存
 7. `/api/calendar` と `/api/day-details` は毎回GAS側の社員権限確認を通過した場合だけデータを返す
+8. 認可成功requestの開始時刻をsessionの `lastAuthorizedAt` として保存し、60秒未満の場合だけlocalStorageのsummary表示を先行許可する
 
 Google OAuth scopeは `openid email profile` だけです。Google access token、refresh token、ID token、社員メール、署名鍵をブラウザーへ保存・送信しません。
 
@@ -23,6 +24,8 @@ Google OAuth scopeは `openid email profile` だけです。Google access token�
 - 絶対有効期限: 7日
 - ログイン成功ごとに新しいsession IDを生成
 - logout、権限取消検出、期限切れでserver-side sessionを削除
+
+`lastAuthorizedAt` はGAS応答完了時刻ではなく、Vercelが認可requestを開始した時刻です。Redis Luaで既存値との最大値だけを原子的に保存するため、遅い旧requestによる時刻の巻き戻しや、削除済みsessionの復活を防ぎます。
 
 OAuth state、PKCE、nonceもRedisへ10分だけ保存し、stateは一度取得すると削除します。OAuthブラウザー結び付けCookieは `__Host-danpro_oauth` です。
 
@@ -52,10 +55,12 @@ Spreadsheet共有権限から作る許可メール値は、Apps Script Script Pr
 - Vercel社員API: `Cache-Control: private, no-store, max-age=0`
 - Vercel CDN共有キャッシュ: 使用禁止
 - localStorage: `date / count / level / symbol / levels / updatedAt`だけ。サーバー側HMACの匿名`userCacheKey`で社員ごとに分離
-- localStorage表示: `/api/auth/session` が現在の社員権限を確認した後だけ
+- localStorage表示: `/api/auth/session` がsession、匿名`userCacheKey`、60秒未満の認可時刻を確認した後だけ
 - 客先名、商品名、工程詳細、period: ブラウザーmemory cacheだけ
 - logout、401、403: localStorage表示キャッシュとmemory詳細キャッシュを削除
 - Apps Script Script Cache: HMAC認証・社員認可境界の内側で集計と詳細に利用可能
+
+60秒grace中に先行表示できるのは `date / count / level / symbol / levels / updatedAt` だけです。grace開始時は詳細memory cache、modal、hover、Spreadsheetリンクを無効化し、バックグラウンドの`/api/calendar`が最新認可に成功した後だけ詳細を再度有効化します。GAS障害時は認可期限までsummaryだけを維持し、期限到達時にsummaryもfail-closedで非表示にします。`/api/day-details` はgraceを使用しません。
 
 ## Security HeadersとCSRF
 
@@ -79,7 +84,7 @@ Redis上の固定時間窓カウンターで、ログイン開始、callback、s
 | replay attack | requestごとのnonce、±120秒timestamp、GAS Lock＋nonce cache | GAS Cache障害時はfail-closed |
 | GAS API URL漏洩 | URLだけでは取得不可、HMAC必須、GET拒否 | 署名鍵漏洩時は鍵rotationが必要 |
 | GAS署名鍵漏洩 | Vercel envとScript Propertiesだけ、ログ禁止 | 両環境侵害時は即時rotationが必要 |
-| 元社員のsession残存 | sessionと権限を分離、各社員APIで共有権限を再取得 | Google側権限反映遅延はGoogle API表示状態に依存 |
+| 元社員のsession残存 | 詳細APIとbackground calendarは毎回共有権限を再取得、403でsession・全表示cacheを削除 | 権限削除後も直前認可から最大60秒はsummaryだけ表示され得る。詳細・Spreadsheetリンクは表示不可 |
 | Vercel CDN誤キャッシュ | 全社員APIをprivate/no-store、テストでs-maxage不在を確認 | 将来header変更時は回帰テスト必須 |
 
 コード内にHIGH/CRITICALの未解決事項はありません。ただし本番外部設定と実接続テストは未完了なので、それらが終わるまでProduction Deployは禁止です。
