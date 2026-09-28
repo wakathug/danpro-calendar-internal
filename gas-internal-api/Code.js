@@ -354,9 +354,20 @@ function getInternalApiDayDetails_(dateKey, expectedRevision) {
 function verifyEmployeeAccessFresh_(email, internalTiming) {
   const normalizedEmail = normalizeEmail_(email);
   if (!normalizedEmail) throw new Error('access denied');
-  const accessPolicyResult = buildSpreadsheetAccessPolicy_(internalTiming);
+  const accessPolicySecretStartedAt = Date.now();
+  const accessPolicyHmacSecret = readAccessPolicyHmacSecret_();
+  recordInternalTiming_(
+    internalTiming,
+    'accessPolicyBuildMs',
+    Date.now() - accessPolicySecretStartedAt,
+  );
+  const accessPolicyResult = buildSpreadsheetAccessPolicy_(accessPolicyHmacSecret, internalTiming);
   const membershipStartedAt = Date.now();
-  const allowed = isEmailAllowedByPolicy_(normalizedEmail, accessPolicyResult.policy);
+  const allowed = isEmailAllowedByPolicy_(
+    normalizedEmail,
+    accessPolicyResult.policy,
+    accessPolicyHmacSecret,
+  );
   recordInternalTiming_(
     internalTiming,
     'employeeMembershipMatchMs',
@@ -375,7 +386,8 @@ function refreshCalendarAggregateCache() {
   try {
     const timing = createCalendarTiming_();
     const spreadsheet = openSpreadsheet_(timing);
-    const accessPolicyResult = buildSpreadsheetAccessPolicy_();
+    const accessPolicyHmacSecret = readAccessPolicyHmacSecret_();
+    const accessPolicyResult = buildSpreadsheetAccessPolicy_(accessPolicyHmacSecret);
     cacheSpreadsheetAccessPolicy_(accessPolicyResult.policy);
     console.info(`access policy refreshed ${JSON.stringify(accessPolicyResult.stats)}`);
     const result = buildFreshCalendarData_(spreadsheet, timing, false);
@@ -675,9 +687,9 @@ function isValidAccessPolicy_(policy) {
   ));
 }
 
-function isEmailAllowedByPolicy_(email, policy) {
+function isEmailAllowedByPolicy_(email, policy, accessPolicyHmacSecret) {
   if (policy.allowAnyAuthenticated) return true;
-  if (policy.allowedEmailHashes.includes(hashEmail_(email))) return true;
+  if (policy.allowedEmailHashes.includes(hashEmail_(email, accessPolicyHmacSecret))) return true;
   const domain = email.slice(email.lastIndexOf('@') + 1);
   return policy.allowedDomains.includes(domain);
 }
@@ -687,22 +699,29 @@ function normalizeEmail_(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
 }
 
-function hashEmail_(email) {
-  const secret = PropertiesService.getScriptProperties().getProperty(
+function readAccessPolicyHmacSecret_() {
+  const accessPolicyHmacSecret = PropertiesService.getScriptProperties().getProperty(
     CALENDAR_CONFIG.accessPolicyHmacSecretProperty,
   );
-  if (typeof secret !== 'string' || secret.length < 32) {
+  if (typeof accessPolicyHmacSecret !== 'string' || accessPolicyHmacSecret.length < 32) {
+    throw new Error('access policy hmac is not configured');
+  }
+  return accessPolicyHmacSecret;
+}
+
+function hashEmail_(email, accessPolicyHmacSecret) {
+  if (typeof accessPolicyHmacSecret !== 'string' || accessPolicyHmacSecret.length < 32) {
     throw new Error('access policy hmac is not configured');
   }
   const digest = Utilities.computeHmacSha256Signature(
     email,
-    secret,
+    accessPolicyHmacSecret,
     Utilities.Charset.UTF_8,
   );
   return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, '');
 }
 
-function buildSpreadsheetAccessPolicy_(internalTiming) {
+function buildSpreadsheetAccessPolicy_(accessPolicyHmacSecret, internalTiming) {
   const policyStartedAt = Date.now();
   const driveBefore = internalTiming ? internalTiming.drivePermissionsReadMs : 0;
   const groupBefore = internalTiming ? internalTiming.groupExpansionMs : 0;
@@ -747,7 +766,10 @@ function buildSpreadsheetAccessPolicy_(internalTiming) {
   const policy = {
     version: 1,
     generatedAt: Date.now(),
-    allowedEmailHashes: Array.from(allowedEmails, hashEmail_).sort(),
+    allowedEmailHashes: Array.from(
+      allowedEmails,
+      (email) => hashEmail_(email, accessPolicyHmacSecret),
+    ).sort(),
     allowedDomains: Array.from(allowedDomains).sort(),
     allowAnyAuthenticated,
   };

@@ -15,6 +15,7 @@ const accessSecret = 'gas-contract-access-secret-that-is-long-enough';
 function createContext() {
   const cache = new Map();
   let groupLookups = 0;
+  const propertyReads = new Map();
   const properties = new Map([
     ['INTERNAL_GAS_SIGNING_SECRET', signingSecret],
     ['ACCESS_POLICY_HMAC_SECRET', accessSecret],
@@ -48,7 +49,12 @@ function createContext() {
     },
     PropertiesService: {
       getScriptProperties() {
-        return { getProperty: (key) => properties.get(key) ?? null };
+        return {
+          getProperty(key) {
+            propertyReads.set(key, (propertyReads.get(key) || 0) + 1);
+            return properties.get(key) ?? null;
+          },
+        };
       },
     },
     CacheService: {
@@ -99,6 +105,7 @@ function createContext() {
   vm.createContext(context);
   vm.runInContext(source, context, { filename: 'Code.js' });
   context.getGroupLookups = () => groupLookups;
+  context.getPropertyReads = (key) => propertyReads.get(key) || 0;
   return context;
 }
 
@@ -159,7 +166,7 @@ test('direct Apps Script GET reveals no employee data and access hashes use keye
   const output = context.doGet();
   assert.equal(output.mimeType, 'application/json');
   assert.deepEqual(JSON.parse(output.text), { ok: false, error: 'METHOD_NOT_ALLOWED' });
-  const digest = context.hashEmail_('employee@example.com');
+  const digest = context.hashEmail_('employee@example.com', accessSecret);
   const plain = crypto.createHash('sha256').update('employee@example.com').digest('base64url');
   assert.match(digest, /^[A-Za-z0-9_-]{43}$/);
   assert.notEqual(digest, plain);
@@ -168,12 +175,15 @@ test('direct Apps Script GET reveals no employee data and access hashes use keye
 test('detailed Apps Script timings are exclusive and zero-group policies skip GroupsApp', () => {
   const context = createContext();
   const timing = context.createInternalRequestTiming_(Date.now() - 50);
-  const policy = context.buildSpreadsheetAccessPolicy_(timing);
+  const policy = context.buildSpreadsheetAccessPolicy_(accessSecret, timing);
   assert.equal(context.getGroupLookups(), 0);
   assert.equal(timing.groupExpansionMs, 0);
   assert.ok(timing.drivePermissionsReadMs >= 0);
   assert.ok(timing.accessPolicyBuildMs >= 0);
-  assert.equal(context.isEmailAllowedByPolicy_('employee@example.com', policy.policy), true);
+  assert.equal(
+    context.isEmailAllowedByPolicy_('employee@example.com', policy.policy, accessSecret),
+    true,
+  );
 
   const output = context.createTimedJsonOutput_({ ok: true, data: { authorized: true } }, timing);
   const internal = JSON.parse(output.text).data.internalTiming;
@@ -202,4 +212,15 @@ test('detailed Apps Script timings are exclusive and zero-group policies skip Gr
   const exclusiveTotal = exclusiveKeys.reduce((sum, key) => sum + internal[key], 0);
   assert.equal(internal.gasUnattributedMs, internal.gasAppTotalMs - exclusiveTotal);
   assert.ok(internal.gasUnattributedMs >= 0);
+});
+
+test('fresh employee authorization reads the access-policy HMAC secret once per request', () => {
+  const context = createContext();
+  const timing = context.createInternalRequestTiming_(Date.now());
+
+  assert.doesNotThrow(() => context.verifyEmployeeAccessFresh_('employee@example.com', timing));
+  assert.equal(context.getPropertyReads('ACCESS_POLICY_HMAC_SECRET'), 1);
+  assert.equal(context.getGroupLookups(), 0);
+  assert.ok(timing.accessPolicyBuildMs >= 0);
+  assert.ok(timing.employeeMembershipMatchMs >= 0);
 });

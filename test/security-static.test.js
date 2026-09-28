@@ -61,7 +61,9 @@ test('new Apps Script project is API-only, HMACs email policy, blocks direct GET
   );
   assert.match(gas, /function doGet\(\)[\s\S]*METHOD_NOT_ALLOWED/);
   assert.doesNotMatch(gas, /HtmlService/);
-  assert.match(gas, /computeHmacSha256Signature\([\s\S]*accessPolicyHmacSecretProperty/);
+  assert.match(gas, /function readAccessPolicyHmacSecret_\(\)[\s\S]*accessPolicyHmacSecretProperty/);
+  assert.match(gas, /function hashEmail_\(email, accessPolicyHmacSecret\)[\s\S]*computeHmacSha256Signature/);
+  assert.doesNotMatch(gas, /function hashEmail_\([^)]*\)[\s\S]{0,300}PropertiesService/);
   assert.match(gas, /consumeNonce_\(request\.nonce, internalTiming\)/);
   assert.match(gas, /signatureClockSkewSeconds: 120/);
   assert.match(gas, /hmacVerificationMs/);
