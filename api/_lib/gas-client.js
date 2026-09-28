@@ -114,9 +114,8 @@ export async function callGas(action, email, body = {}, options = {}) {
     }
   }
   if (INTERNAL_TIMING_METRICS.every((name) => Object.hasOwn(safeInternalTiming, name))) {
-    const gasTransportAndPlatformMs = Math.max(
-      0,
-      Math.round((gasFetchMs - safeInternalTiming.gasAppTotalMs) * 10) / 10,
+    const gasTransportAndPlatformMs = (
+      Math.round((gasFetchMs - safeInternalTiming.gasAppTotalMs) * 10) / 10
     );
     logGasInternalTiming(action, {
       gasFetchMs,

@@ -262,9 +262,8 @@ function createTimedJsonOutput_(payload, internalTiming) {
   JSON.stringify(payload);
   internalTiming.responseSerializeMs = Date.now() - serializationStartedAt;
   internalTiming.gasAppTotalMs = Date.now() - internalTiming.requestStartedAt;
-  internalTiming.gasUnattributedMs = Math.max(
-    0,
-    internalTiming.gasAppTotalMs - sumExclusiveInternalTiming_(internalTiming),
+  internalTiming.gasUnattributedMs = (
+    internalTiming.gasAppTotalMs - sumExclusiveInternalTiming_(internalTiming)
   );
   if (payload && payload.ok === true && payload.data && typeof payload.data === 'object') {
     payload.data.internalTiming = buildInternalTimingResponse_(internalTiming);

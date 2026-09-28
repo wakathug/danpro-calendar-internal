@@ -125,20 +125,23 @@ test('detailed GAS timing is logged server-side and removed from browser respons
   const originalInfo = console.info;
   const messages = [];
   console.info = (message) => messages.push(String(message));
-  globalThis.fetch = async () => gasResponse({
-    ok: true,
-    data: {
-      days: [],
-      levels: [],
-      updatedAt: '2026-09-25T00:00:00.000Z',
-      serverTiming: {
-        hmacVerificationMs: 9,
-        employeePermissionCheckMs: 8,
-        calendarAggregateReadMs: 1,
+  globalThis.fetch = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return gasResponse({
+      ok: true,
+      data: {
+        days: [],
+        levels: [],
+        updatedAt: '2026-09-25T00:00:00.000Z',
+        serverTiming: {
+          hmacVerificationMs: 9,
+          employeePermissionCheckMs: 8,
+          calendarAggregateReadMs: 1,
+        },
+        internalTiming: detailedGasTiming(),
       },
-      internalTiming: detailedGasTiming(),
-    },
-  });
+    });
+  };
 
   try {
     const response = mockResponse();
