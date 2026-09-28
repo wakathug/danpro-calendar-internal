@@ -50,6 +50,7 @@ test('security headers are strict and employee APIs cannot be shared-cacheable',
   assert.match(headers['Permissions-Policy'], /camera=\(\)/);
   assert.match(read('api/_lib/http.js'), /private, no-store, max-age=0/);
   assert.doesNotMatch(read('api/_lib/http.js'), /s-maxage|stale-while-revalidate/);
+  assert.equal(vercel.git.deploymentEnabled.main, false);
 });
 
 test('new Apps Script project is API-only, HMACs email policy, blocks direct GET, and has no writes', () => {
@@ -66,6 +67,10 @@ test('new Apps Script project is API-only, HMACs email policy, blocks direct GET
   assert.match(gas, /hmacVerificationMs/);
   assert.match(gas, /employeePermissionCheckMs/);
   assert.match(gas, /calendarAggregateReadMs/);
+  assert.match(gas, /function ensureCalendarAggregateTrigger\(\)/);
+  assert.match(gas, /newTrigger\(handler\)\.timeBased\(\)\.everyMinutes\(1\)\.create\(\)/);
+  assert.ok(gas.indexOf('const created = ScriptApp.newTrigger') < gas.indexOf('existing.forEach((trigger) => ScriptApp.deleteTrigger(trigger))'));
+  assert.match(gas, /function getCalendarAggregateTriggerState\(\)/);
   assert.doesNotMatch(calendarRequestPath, /openSpreadsheet_|buildFreshCalendarData_|getRange\(/);
   assert.doesNotMatch(gas, /\.setValue\(|\.setValues\(|\.appendRow\(|\.deleteRow\(|\.insertRow/);
 });
@@ -73,6 +78,7 @@ test('new Apps Script project is API-only, HMACs email policy, blocks direct GET
 test('Apps Script manifest grants the scope required by SpreadsheetApp without write code', () => {
   const manifest = JSON.parse(read('gas-internal-api/appsscript.json'));
   assert.ok(manifest.oauthScopes.includes('https://www.googleapis.com/auth/spreadsheets'));
+  assert.ok(manifest.oauthScopes.includes('https://www.googleapis.com/auth/script.scriptapp'));
   assert.equal(manifest.oauthScopes.includes('https://www.googleapis.com/auth/spreadsheets.readonly'), false);
   assert.deepEqual(manifest.webapp, {
     access: 'ANYONE_ANONYMOUS',

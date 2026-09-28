@@ -31,4 +31,4 @@ deploymentを外部公開する前に、対象Spreadsheetの読み取り、Drive
 
 ## キャッシュ更新
 
-必要に応じて `refreshCalendarAggregateCache` を1分間隔の時間主導トリガーで実行します。社員認可は各APIリクエストでSpreadsheet共有権限を再取得するため、既存sessionが残っていても共有解除後の次回アクセスは拒否されます。
+本番反映時は最初に `refreshCalendarAggregateCache` を実行してキャッシュを生成し、続けて `ensureCalendarAggregateTrigger` を1回実行します。この関数は新しい1分トリガーの作成に成功してから同じhandlerの旧トリガーを削除し、正確に1件へ収束させます。`getCalendarAggregateTriggerState` の `matchingTriggerCount` が `1` であることを確認してください。社員認可は各APIリクエストでSpreadsheet共有権限を再取得するため、既存sessionが残っていても共有解除後の次回アクセスは拒否されます。

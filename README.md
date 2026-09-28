@@ -55,6 +55,8 @@ Drive権限の`user`、`group`、`domain`、`anyone`を区別します。Google 
 
 Vercel Functionsは`vercel.json`の`regions: ["hnd1"]`でTokyoへ固定し、Node.js runtimeのまま実行します。
 
+Production反映順序をGAS cache準備後に固定するため、Git連携による`main`の自動deployは無効化しています。ProductionはGASのrefresh・1分trigger・既存deployment更新・スモークテスト完了後にVercel CLIから明示的にdeployします。
+
 ## 事前集計トリガー（本番では手動設定）
 
 コード内の`refreshCalendarAggregateCache()`が表示専用キャッシュを再集計する関数です。リポジトリや`clasp push`からトリガーを自動作成しません。本番で有効化する場合は、Apps Scriptエディタの「トリガー」から次の設定を1件追加してください。

@@ -298,6 +298,50 @@ function refreshCalendarAggregateCache() {
   }
 }
 
+/**
+ * refreshCalendarAggregateCache の1分トリガーを正確に1件へ収束させます。
+ * 新しいトリガーの作成に失敗した場合も、既存トリガーは先に削除しません。
+ */
+function ensureCalendarAggregateTrigger() {
+  const handler = 'refreshCalendarAggregateCache';
+  const existing = ScriptApp.getProjectTriggers()
+    .filter((trigger) => trigger.getHandlerFunction() === handler);
+  const created = ScriptApp.newTrigger(handler).timeBased().everyMinutes(1).create();
+  const createdId = created.getUniqueId();
+
+  existing.forEach((trigger) => ScriptApp.deleteTrigger(trigger));
+
+  const matching = ScriptApp.getProjectTriggers()
+    .filter((trigger) => trigger.getHandlerFunction() === handler);
+  if (matching.length !== 1 || matching[0].getUniqueId() !== createdId) {
+    throw new Error('calendar aggregate trigger verification failed');
+  }
+  return {
+    ok: true,
+    data: {
+      handler,
+      intervalMinutes: 1,
+      matchingTriggerCount: matching.length,
+      replacedTriggerCount: existing.length,
+    },
+  };
+}
+
+/** refreshCalendarAggregateCache に紐づくtrigger件数だけを返します。 */
+function getCalendarAggregateTriggerState() {
+  const handler = 'refreshCalendarAggregateCache';
+  const matching = ScriptApp.getProjectTriggers()
+    .filter((trigger) => trigger.getHandlerFunction() === handler);
+  return {
+    ok: true,
+    data: {
+      handler,
+      matchingTriggerCount: matching.length,
+      eventTypes: matching.map((trigger) => String(trigger.getEventType())),
+    },
+  };
+}
+
 function createCalendarTiming_(requestTiming) {
   const requestStartedAt = requestTiming && Number.isFinite(requestTiming.requestStartedAt)
     ? requestTiming.requestStartedAt
