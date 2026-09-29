@@ -1,5 +1,9 @@
 const CALENDAR_CONFIG = Object.freeze({
   spreadsheetId: '1KOHReFlDdmJvLWX16Qram6TSogWMXwW4ddWRI6uWjfY',
+  spreadsheetIdProperty: 'CALENDAR_SPREADSHEET_ID',
+  stagingScriptId: '1cQSSPk0RJzPC4oI9Yl3SZFLqOnxAm-XNmdVFD9y8flhIoZW7VDBmSWQG',
+  stagingEnvironmentProperty: 'STAGING_ENVIRONMENT',
+  stagingEnvironmentValue: 'danpro-calendar-internal-staging',
   timeZone: 'Asia/Tokyo',
   headerRow: 2,
   dataStartRow: 3,
@@ -16,6 +20,8 @@ const CALENDAR_CONFIG = Object.freeze({
   calendarCacheTtlSeconds: 180,
   calendarCacheMaxAgeMs: 2 * 60 * 1000,
   calendarCacheMaxValueChars: 90000,
+  cachePublishStateProperty: 'CALENDAR_CACHE_PUBLISH_STATE_V1',
+  cachePublishLockWaitMs: 1,
   accessCacheKey: 'employee-access:v1',
   accessCacheTtlSeconds: 180,
   accessCacheMaxAgeMs: 150 * 1000,
@@ -356,6 +362,7 @@ function getInternalApiDayDetails_(dateKey, expectedRevision, internalTiming) {
     return cached;
   }
 
+  const fallbackStartedAt = Date.now();
   const timing = createCalendarTiming_();
   const spreadsheet = openSpreadsheet_(timing);
   const layout = resolveCurrentScheduleSheet_(timing, spreadsheet);
@@ -375,8 +382,14 @@ function getInternalApiDayDetails_(dateKey, expectedRevision, internalTiming) {
     'dayDetailsRevisionMs',
     Date.now() - revisionStartedAt,
   );
+  const calendar = buildCalendarDataFromSnapshot_(layout, snapshot, revision);
   const cacheWriteStartedAt = Date.now();
-  cacheDayDetailsSnapshot_(layout.sheetId, snapshot.detailsByDate, snapshot.updatedAt, revision);
+  publishCalendarSnapshot_(
+    calendar,
+    snapshot.detailsByDate,
+    fallbackStartedAt,
+    false,
+  );
   recordInternalTiming_(
     internalTiming,
     'dayDetailsCacheWriteMs',
@@ -422,6 +435,12 @@ function verifyEmployeeAccessFresh_(email, internalTiming) {
  * Spreadsheet共有権限と表示専用カレンダーを更新します。トリガー自体は作成しません。
  */
 function refreshCalendarAggregateCache() {
+  const refreshStartedAt = Date.now();
+  const refreshLock = LockService.getUserLock();
+  if (!refreshLock.tryLock(CALENDAR_CONFIG.cachePublishLockWaitMs)) {
+    console.info('calendar aggregate refresh skipped {"reason":"overlap"}');
+    return { ok: true, data: { skipped: true, reason: 'overlap' } };
+  }
   try {
     const timing = createCalendarTiming_();
     const spreadsheet = openSpreadsheet_(timing);
@@ -432,9 +451,21 @@ function refreshCalendarAggregateCache() {
     // The same snapshot already used for the summary also precomputes the
     // revision-scoped detail data. Every web request still performs the full
     // HMAC, nonce, Drive Permissions, and membership checks before reading it.
-    const result = buildFreshCalendarData_(spreadsheet, timing, true);
+    const fresh = buildFreshCalendarData_(spreadsheet, timing);
+    const result = fresh.calendar;
     timing.spreadsheetFetchCompletedMs = Date.now() - timing.startedAt;
-    cacheCalendarAggregate_(result);
+    const publishResult = publishCalendarSnapshot_(
+      result,
+      fresh.detailsByDate,
+      refreshStartedAt,
+      true,
+    );
+    if (!publishResult.published) {
+      console.info(`calendar aggregate refresh skipped ${JSON.stringify({
+        reason: publishResult.reason,
+      })}`);
+      return { ok: true, data: { skipped: true, reason: publishResult.reason } };
+    }
     delete result.sheetId;
     attachCalendarTiming_(result, timing, false);
     return {
@@ -450,6 +481,8 @@ function refreshCalendarAggregateCache() {
     };
   } catch (error) {
     return createSafeErrorResponse_(error);
+  } finally {
+    refreshLock.releaseLock();
   }
 }
 
@@ -534,7 +567,7 @@ function finalizeRequestTiming_(requestTiming) {
 
 function openSpreadsheet_(timing) {
   const openStartedAt = Date.now();
-  const spreadsheet = SpreadsheetApp.openById(CALENDAR_CONFIG.spreadsheetId);
+  const spreadsheet = SpreadsheetApp.openById(getCalendarSpreadsheetId_());
   spreadsheet.getId();
   timing.spreadsheetOpenMs += Date.now() - openStartedAt;
   return spreadsheet;
@@ -549,23 +582,19 @@ function attachCalendarTiming_(result, timing, cacheHit) {
   return result;
 }
 
-function buildFreshCalendarData_(spreadsheet, timing, cacheDetails) {
+function buildFreshCalendarData_(spreadsheet, timing) {
   const layout = resolveCurrentScheduleSheet_(timing, spreadsheet);
   const snapshot = readScheduleSnapshot_(layout, timing);
   const revisionStartedAt = Date.now();
   const detailRevision = buildDetailRevision_(layout.sheetId, snapshot);
   timing.revisionMs = Date.now() - revisionStartedAt;
-  if (cacheDetails) {
-    const cacheStartedAt = Date.now();
-    cacheDayDetailsSnapshot_(
-      layout.sheetId,
-      snapshot.detailsByDate,
-      snapshot.updatedAt,
-      detailRevision,
-    );
-    timing.detailCacheWriteMs = Date.now() - cacheStartedAt;
-  }
+  return {
+    calendar: buildCalendarDataFromSnapshot_(layout, snapshot, detailRevision),
+    detailsByDate: snapshot.detailsByDate,
+  };
+}
 
+function buildCalendarDataFromSnapshot_(layout, snapshot, detailRevision) {
   const days = Object.keys(snapshot.countsByDate)
     .sort()
     .map((date) => {
@@ -648,8 +677,92 @@ function cacheCalendarAggregate_(result) {
       serialized,
       CALENDAR_CONFIG.calendarCacheTtlSeconds,
     );
+    return true;
   } catch (error) {
     console.warn('calendar aggregate cache write skipped');
+    return false;
+  }
+}
+
+/**
+ * Summary・詳細・active generationを、処理開始時刻に基づく単一の公開規則で更新します。
+ * triggerは実行中ずっとUserLockを保持し、Web fallbackは公開直前だけ同じlockを試します。
+ * nonce検証のScriptLockとは別scopeであり、Web認可中はUserLockを待ちません。
+ */
+function publishCalendarSnapshot_(calendar, detailsByDate, startedAtMs, lockAlreadyHeld) {
+  const normalizedStartedAt = Number(startedAtMs);
+  if (!Number.isFinite(normalizedStartedAt) || normalizedStartedAt <= 0) {
+    return { published: false, reason: 'invalid_started_at' };
+  }
+
+  const publishLock = LockService.getUserLock();
+  let acquiredHere = false;
+  if (!lockAlreadyHeld) {
+    if (!publishLock.tryLock(CALENDAR_CONFIG.cachePublishLockWaitMs)) {
+      return { published: false, reason: 'publish_lock_unavailable' };
+    }
+    acquiredHere = true;
+  }
+
+  try {
+    const userProperties = PropertiesService.getUserProperties();
+    const currentState = parseCachePublishState_(
+      userProperties.getProperty(CALENDAR_CONFIG.cachePublishStateProperty),
+    );
+    if (currentState && currentState.startedAtMs >= normalizedStartedAt) {
+      return { published: false, reason: 'stale_generation' };
+    }
+
+    const state = {
+      version: 1,
+      startedAtMs: normalizedStartedAt,
+      sheetId: String(calendar.sheetId),
+      revision: calendar.detailRevision,
+    };
+    // Reserve the order before best-effort cache writes. If a write fails, an
+    // older execution still cannot roll the published state backwards.
+    userProperties.setProperty(
+      CALENDAR_CONFIG.cachePublishStateProperty,
+      JSON.stringify(state),
+    );
+
+    const detailsWritten = cacheDayDetailsSnapshot_(
+      calendar.sheetId,
+      detailsByDate,
+      calendar.updatedAt,
+      calendar.detailRevision,
+      normalizedStartedAt,
+    );
+    if (!detailsWritten) return { published: false, reason: 'detail_cache_write_failed' };
+
+    const aggregateWritten = cacheCalendarAggregate_(calendar);
+    if (!aggregateWritten) return { published: false, reason: 'aggregate_cache_write_failed' };
+    return { published: true, reason: 'published' };
+  } catch (error) {
+    console.warn('calendar snapshot publish skipped');
+    return { published: false, reason: 'publish_failed' };
+  } finally {
+    if (acquiredHere) publishLock.releaseLock();
+  }
+}
+
+function parseCachePublishState_(serialized) {
+  try {
+    if (!serialized) return null;
+    const state = JSON.parse(serialized);
+    if (
+      !state
+      || state.version !== 1
+      || !Number.isFinite(state.startedAtMs)
+      || state.startedAtMs <= 0
+      || typeof state.sheetId !== 'string'
+      || !/^\d+$/.test(state.sheetId)
+      || typeof state.revision !== 'string'
+      || !/^[A-Za-z0-9_-]{43}$/.test(state.revision)
+    ) return null;
+    return state;
+  } catch (error) {
+    return null;
   }
 }
 
@@ -838,6 +951,7 @@ function buildSpreadsheetAccessPolicy_(accessPolicyHmacSecret, internalTiming) {
 function listSpreadsheetPermissions_(internalTiming) {
   const startedAt = Date.now();
   const permissions = [];
+  const spreadsheetId = getCalendarSpreadsheetId_();
   let pageToken;
   do {
     const options = {
@@ -846,7 +960,7 @@ function listSpreadsheetPermissions_(internalTiming) {
       supportsAllDrives: true,
     };
     if (pageToken) options.pageToken = pageToken;
-    const page = Drive.Permissions.list(CALENDAR_CONFIG.spreadsheetId, options);
+    const page = Drive.Permissions.list(spreadsheetId, options);
     (page.permissions || []).forEach((permission) => permissions.push(permission));
     pageToken = page.nextPageToken;
   } while (pageToken);
@@ -973,7 +1087,7 @@ function resolveCurrentScheduleSheet_(timing, openedSpreadsheet) {
   let spreadsheet = openedSpreadsheet;
   if (!spreadsheet) {
     const openStartedAt = Date.now();
-    spreadsheet = SpreadsheetApp.openById(CALENDAR_CONFIG.spreadsheetId);
+    spreadsheet = SpreadsheetApp.openById(getCalendarSpreadsheetId_());
     if (timing) timing.spreadsheetOpenMs += Date.now() - openStartedAt;
   }
   const sheets = spreadsheet.getSheets();
@@ -1046,7 +1160,28 @@ function inspectScheduleSheet_(sheet, now, timing) {
 
 /** @return {string} */
 function buildSpreadsheetUrl_(sheetId) {
-  return `https://docs.google.com/spreadsheets/d/${CALENDAR_CONFIG.spreadsheetId}/edit?gid=${sheetId}`;
+  return `https://docs.google.com/spreadsheets/d/${getCalendarSpreadsheetId_()}/edit?gid=${sheetId}`;
+}
+
+function getCalendarSpreadsheetId_() {
+  const properties = PropertiesService.getScriptProperties();
+  const configured = properties.getProperty(CALENDAR_CONFIG.spreadsheetIdProperty);
+  if (ScriptApp.getScriptId() === CALENDAR_CONFIG.stagingScriptId) {
+    const stagingMarker = properties.getProperty(CALENDAR_CONFIG.stagingEnvironmentProperty);
+    if (
+      stagingMarker !== CALENDAR_CONFIG.stagingEnvironmentValue
+      || configured == null
+      || configured === ''
+    ) {
+      throw new Error('staging calendar data source is not initialized');
+    }
+  }
+  if (configured == null || configured === '') return CALENDAR_CONFIG.spreadsheetId;
+  const normalized = String(configured).trim();
+  if (!/^[A-Za-z0-9_-]{20,128}$/.test(normalized)) {
+    throw new Error('invalid calendar spreadsheet configuration');
+  }
+  return normalized;
 }
 
 /**
@@ -1175,10 +1310,10 @@ function resolveMergedDisplayColumn_(dataValues, startRow, startColumn, column, 
  * 日付別詳細を現在ユーザー専用キャッシュへ保存し、最後に現行世代を切り替えます。
  * 世代にsheetIdを含めるため、左端タブ切替後の更新で旧タブの詳細は参照されません。
  */
-function cacheDayDetailsSnapshot_(sheetId, detailsByDate, updatedAt, revision) {
+function cacheDayDetailsSnapshot_(sheetId, detailsByDate, updatedAt, revision, startedAtMs) {
   try {
     const cache = CacheService.getUserCache();
-    const generation = `${sheetId}:${revision}`;
+    const generation = `${sheetId}:${revision}:${startedAtMs}`;
     const cacheValues = {};
     Object.keys(detailsByDate).forEach((date) => {
       const serialized = JSON.stringify({
@@ -1196,11 +1331,18 @@ function cacheDayDetailsSnapshot_(sheetId, detailsByDate, updatedAt, revision) {
     }
     cache.put(
       CALENDAR_CONFIG.detailCacheActiveKey,
-      JSON.stringify({ generation, sheetId: String(sheetId), revision }),
+      JSON.stringify({
+        generation,
+        sheetId: String(sheetId),
+        revision,
+        startedAtMs,
+      }),
       CALENDAR_CONFIG.detailCacheTtlSeconds,
     );
+    return true;
   } catch (error) {
     console.warn('day details cache write skipped');
+    return false;
   }
 }
 

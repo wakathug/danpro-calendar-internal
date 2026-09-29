@@ -9,3 +9,5 @@ Thumbs.db
 !.env.example
 .vercel/
 gas-internal-api/.clasp.json
+.staging-clasp/
+.staging-secrets/

@@ -9,6 +9,10 @@
     "test": "node --test test/*.test.js && node tools/test_calendar.cjs",
     "test:security": "node --test test/*.test.js",
     "test:legacy": "node tools/test_calendar.cjs",
+    "gas:staging:verify": "node tools/gas_staging.cjs verify",
+    "gas:staging:status": "node tools/gas_staging.cjs status",
+    "gas:staging:push": "node tools/gas_staging.cjs push",
+    "gas:staging:bootstrap:push": "node tools/gas_staging.cjs bootstrap-push",
     "preview": "node tools/vercel_ui_server.cjs"
   },
   "dependencies": {

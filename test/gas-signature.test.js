@@ -57,6 +57,9 @@ function createContext() {
         };
       },
     },
+    ScriptApp: {
+      getScriptId: () => 'production-script-id',
+    },
     CacheService: {
       getScriptCache() {
         return {

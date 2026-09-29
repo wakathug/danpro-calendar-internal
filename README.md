@@ -67,3 +67,20 @@ Production反映順序をGAS cache準備後に固定するため、Git連携に�
 4. 時間の間隔: 1分おき
 
 トリガー作成者には対象Spreadsheetの閲覧権限に加え、Driveメタデータと、共有にGoogle Groupがある場合はそのメンバー一覧を閲覧できる権限が必要です。Drive API v3はmanifestで有効化済みです。コード更新後はエディタから関数を1回実行して追加スコープを承認し、実行がエラーなく完了することを確認してください。関数はSpreadsheetや共有設定へ書き込みません。Webアプリは従来どおり「アクセスしているユーザーとして実行」する構成を維持します。
+
+## 独立検証用Apps Script
+
+詳細キャッシュの競合検証には、本番と別のApps Script `danpro-calendar-internal-staging` を使用します。Script IDは`.clasp.staging.json`へ固定し、`tools/gas_staging.cjs`は本番Script ID、未知のScript ID、`main`/`master`ブランチ、TTL 75秒・公開ロック・runtime data-source guardを欠くソースを拒否します。検証用Script ID上でも`STAGING_ENVIRONMENT`と`CALENDAR_SPREADSHEET_ID`が揃うまでは、本番Spreadsheet IDへフォールバックせずfail-closedになります。
+
+初期化用ソースは`gas-internal-api-staging-bootstrap`に分離しています。ダミーSpreadsheetと新規の検証用署名secretを作成しますが、secret値は返却・ログ出力しません。また、既存triggerが1件でもあれば初期化を拒否し、triggerを作成するコードは含みません。初期化後に通常の`gas-internal-api`ソースへ置き換える手順です。
+
+検証用GASへの操作は、必ず次のguard経由で行います。
+
+```powershell
+npm run gas:staging:verify
+npm run gas:staging:status
+npm run gas:staging:bootstrap:push
+npm run gas:staging:push
+```
+
+検証用の1分triggerは、同一実行者のApps Script利用枠を確認して明示承認を得るまで作成しません。Preview接続が必要な場合も、branch限定の環境変数だけを使い、Production環境変数や全Preview共通値は変更しません。
