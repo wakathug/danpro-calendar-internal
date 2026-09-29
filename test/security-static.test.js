@@ -82,7 +82,7 @@ test('new Apps Script project is API-only, HMACs email policy, blocks direct GET
   assert.ok(gas.indexOf('const created = ScriptApp.newTrigger') < gas.indexOf('existing.forEach((trigger) => ScriptApp.deleteTrigger(trigger))'));
   assert.match(gas, /function getCalendarAggregateTriggerState\(\)/);
   assert.match(gas, /buildFreshCalendarData_\(spreadsheet, timing, true\)/);
-  assert.match(gas, /detailCacheTtlSeconds: 180/);
+  assert.match(gas, /detailCacheTtlSeconds: 75/);
   assert.match(gas, /dayDetailsCacheHit/);
   assert.doesNotMatch(calendarRequestPath, /openSpreadsheet_|buildFreshCalendarData_|getRange\(/);
   assert.doesNotMatch(gas, /\.setValue\(|\.setValues\(|\.appendRow\(|\.deleteRow\(|\.insertRow/);

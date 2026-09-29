@@ -8,7 +8,7 @@ const CALENDAR_CONFIG = Object.freeze({
   contentColumn: 8,
   periodColumn: 13,
   endMarker: '案件数',
-  detailCacheTtlSeconds: 180,
+  detailCacheTtlSeconds: 75,
   detailCacheActiveKey: 'day-details:active:v1',
   detailCacheKeyPrefix: 'day-details:v1:',
   detailCacheMaxValueChars: 24000,
