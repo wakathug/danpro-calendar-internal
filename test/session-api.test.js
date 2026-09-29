@@ -62,6 +62,14 @@ function detailedGasTiming(overrides = {}) {
     accessPolicyBuildMs: 1,
     employeeMembershipMatchMs: 1,
     calendarAggregateReadMs: 1,
+    dayDetailsCacheReadMs: 0,
+    dayDetailsSpreadsheetOpenMs: 0,
+    dayDetailsSheetResolutionMs: 0,
+    dayDetailsSpreadsheetReadMs: 0,
+    dayDetailsBuildMs: 0,
+    dayDetailsRevisionMs: 0,
+    dayDetailsCacheWriteMs: 0,
+    dayDetailsCacheHit: 0,
     responseSerializeMs: 1,
     gasAppTotalMs: 20,
     gasUnattributedMs: 7,
@@ -215,6 +223,9 @@ test('GAS failure does not extend authorization and day details always performs 
   assert.equal(details.statusCode, 200);
   assert.equal(detailCalls, 1);
   assert.equal(details.json().authorization.revalidated, true);
+  assert.match(details.getHeader('server-timing'), /upstash;dur=/);
+  assert.match(details.getHeader('server-timing'), /gasFetch;dur=/);
+  assert.equal(details.getHeader('cache-control'), 'private, no-store, max-age=0');
 });
 
 test('bootstrap reads the session once and returns only anonymous identity plus calendar summary', async () => {
@@ -275,6 +286,29 @@ test('detailed GAS timing is logged server-side and removed from browser respons
     assert.equal(response.json().data.internalTiming, undefined);
     assert.doesNotMatch(response.body, /requestParseMs|gasAppTotalMs|employee@example\.com/);
     assert.doesNotMatch(response.getHeader('server-timing'), /requestParse|gasAppTotal/);
+
+    globalThis.fetch = async () => gasResponse({
+      ok: true,
+      data: {
+        date: '2026-09-28',
+        items: [],
+        revision: 'revision-a',
+        internalTiming: detailedGasTiming({
+          calendarAggregateReadMs: 0,
+          dayDetailsCacheReadMs: 12,
+          dayDetailsCacheHit: 1,
+        }),
+      },
+    });
+    const detailsResponse = mockResponse();
+    await dayDetailsHandler(mockRequest({
+      headers: { cookie: cookieHeader(created.cookie) },
+      query: { date: '2026-09-28', revision: 'revision-a' },
+    }), detailsResponse);
+    assert.equal(detailsResponse.statusCode, 200);
+    assert.equal(detailsResponse.json().data.internalTiming, undefined);
+    assert.doesNotMatch(detailsResponse.body, /dayDetailsCacheReadMs|dayDetailsCacheHit/);
+    assert.doesNotMatch(detailsResponse.getHeader('server-timing'), /dayDetailsCache/);
   } finally {
     console.info = originalInfo;
   }
@@ -287,6 +321,11 @@ test('detailed GAS timing is logged server-side and removed from browser respons
   assert.equal(timingLog.groupExpansionMs, 0);
   assert.ok(timingLog.gasTransportAndPlatformMs >= 0);
   assert.doesNotMatch(JSON.stringify(timingLog), /employee@example\.com|session:v1:/);
+  const detailTimingLog = messages.map((message) => JSON.parse(message))
+    .find((message) => message.event === 'gas_internal_timing' && message.action === 'dayDetails');
+  assert.ok(detailTimingLog);
+  assert.equal(detailTimingLog.dayDetailsCacheReadMs, 12);
+  assert.equal(detailTimingLog.dayDetailsCacheHit, 1);
 });
 
 test('permission removal invalidates an existing server-side session on next check', async () => {

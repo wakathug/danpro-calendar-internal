@@ -202,13 +202,22 @@ test('detailed Apps Script timings are exclusive and zero-group policies skip Gr
     'accessPolicyBuildMs',
     'employeeMembershipMatchMs',
     'calendarAggregateReadMs',
+    'dayDetailsCacheReadMs',
+    'dayDetailsSpreadsheetOpenMs',
+    'dayDetailsSheetResolutionMs',
+    'dayDetailsSpreadsheetReadMs',
+    'dayDetailsBuildMs',
+    'dayDetailsRevisionMs',
+    'dayDetailsCacheWriteMs',
     'responseSerializeMs',
   ];
   assert.deepEqual(Object.keys(internal).sort(), [
     ...exclusiveKeys,
+    'dayDetailsCacheHit',
     'gasAppTotalMs',
     'gasUnattributedMs',
   ].sort());
+  assert.equal(internal.dayDetailsCacheHit, 0);
   const exclusiveTotal = exclusiveKeys.reduce((sum, key) => sum + internal[key], 0);
   assert.equal(internal.gasUnattributedMs, internal.gasAppTotalMs - exclusiveTotal);
   assert.ok(internal.gasUnattributedMs >= 0);

@@ -8,7 +8,7 @@ const CALENDAR_CONFIG = Object.freeze({
   contentColumn: 8,
   periodColumn: 13,
   endMarker: '案件数',
-  detailCacheTtlSeconds: 75,
+  detailCacheTtlSeconds: 180,
   detailCacheActiveKey: 'day-details:active:v1',
   detailCacheKeyPrefix: 'day-details:v1:',
   detailCacheMaxValueChars: 24000,
@@ -63,6 +63,13 @@ const INTERNAL_EXCLUSIVE_TIMING_KEYS = Object.freeze([
   'accessPolicyBuildMs',
   'employeeMembershipMatchMs',
   'calendarAggregateReadMs',
+  'dayDetailsCacheReadMs',
+  'dayDetailsSpreadsheetOpenMs',
+  'dayDetailsSheetResolutionMs',
+  'dayDetailsSpreadsheetReadMs',
+  'dayDetailsBuildMs',
+  'dayDetailsRevisionMs',
+  'dayDetailsCacheWriteMs',
   'responseSerializeMs',
 ]);
 
@@ -112,6 +119,7 @@ function doPost(event) {
         data: getInternalApiDayDetails_(
           request.body && request.body.date,
           request.body && request.body.expectedRevision,
+          internalTiming,
         ),
       }, internalTiming);
     }
@@ -278,6 +286,7 @@ function createInternalRequestTiming_(requestStartedAt) {
   });
   timing.gasAppTotalMs = 0;
   timing.gasUnattributedMs = 0;
+  timing.dayDetailsCacheHit = 0;
   return timing;
 }
 
@@ -302,6 +311,7 @@ function buildInternalTimingResponse_(timing) {
   });
   result.gasAppTotalMs = timing.gasAppTotalMs;
   result.gasUnattributedMs = timing.gasUnattributedMs;
+  result.dayDetailsCacheHit = timing.dayDetailsCacheHit === 1 ? 1 : 0;
   return result;
 }
 
@@ -325,7 +335,7 @@ function getInternalApiCalendarData_(requestTiming, internalTiming) {
   throw new Error('calendar aggregate cache unavailable');
 }
 
-function getInternalApiDayDetails_(dateKey, expectedRevision) {
+function getInternalApiDayDetails_(dateKey, expectedRevision, internalTiming) {
   const normalizedDateKey = normalizeDateKey_(dateKey);
   if (!normalizedDateKey) throw new Error('invalid date');
   const normalizedRevision = String(expectedRevision == null ? '' : expectedRevision);
@@ -333,16 +343,45 @@ function getInternalApiDayDetails_(dateKey, expectedRevision) {
     throw new Error('invalid revision');
   }
 
+  const cacheReadStartedAt = Date.now();
   const cached = getCachedDayDetails_(normalizedDateKey, normalizedRevision);
+  recordInternalTiming_(
+    internalTiming,
+    'dayDetailsCacheReadMs',
+    Date.now() - cacheReadStartedAt,
+  );
   if (cached) {
+    if (internalTiming) internalTiming.dayDetailsCacheHit = 1;
     cached.items = sortDayDetailItems_(cached.items);
     return cached;
   }
 
-  const layout = resolveCurrentScheduleSheet_();
-  const snapshot = readScheduleSnapshot_(layout);
+  const timing = createCalendarTiming_();
+  const spreadsheet = openSpreadsheet_(timing);
+  const layout = resolveCurrentScheduleSheet_(timing, spreadsheet);
+  const snapshot = readScheduleSnapshot_(layout, timing);
+  recordInternalTiming_(internalTiming, 'dayDetailsSpreadsheetOpenMs', timing.spreadsheetOpenMs);
+  recordInternalTiming_(
+    internalTiming,
+    'dayDetailsSheetResolutionMs',
+    Math.max(0, timing.latestSheetResolutionMs - timing.spreadsheetReadMs),
+  );
+  recordInternalTiming_(internalTiming, 'dayDetailsSpreadsheetReadMs', timing.spreadsheetReadMs);
+  recordInternalTiming_(internalTiming, 'dayDetailsBuildMs', timing.aggregationMs);
+  const revisionStartedAt = Date.now();
   const revision = buildDetailRevision_(layout.sheetId, snapshot);
+  recordInternalTiming_(
+    internalTiming,
+    'dayDetailsRevisionMs',
+    Date.now() - revisionStartedAt,
+  );
+  const cacheWriteStartedAt = Date.now();
   cacheDayDetailsSnapshot_(layout.sheetId, snapshot.detailsByDate, snapshot.updatedAt, revision);
+  recordInternalTiming_(
+    internalTiming,
+    'dayDetailsCacheWriteMs',
+    Date.now() - cacheWriteStartedAt,
+  );
   return {
     date: normalizedDateKey,
     items: sortDayDetailItems_(snapshot.detailsByDate[normalizedDateKey] || []),
@@ -390,7 +429,10 @@ function refreshCalendarAggregateCache() {
     const accessPolicyResult = buildSpreadsheetAccessPolicy_(accessPolicyHmacSecret);
     cacheSpreadsheetAccessPolicy_(accessPolicyResult.policy);
     console.info(`access policy refreshed ${JSON.stringify(accessPolicyResult.stats)}`);
-    const result = buildFreshCalendarData_(spreadsheet, timing, false);
+    // The same snapshot already used for the summary also precomputes the
+    // revision-scoped detail data. Every web request still performs the full
+    // HMAC, nonce, Drive Permissions, and membership checks before reading it.
+    const result = buildFreshCalendarData_(spreadsheet, timing, true);
     timing.spreadsheetFetchCompletedMs = Date.now() - timing.startedAt;
     cacheCalendarAggregate_(result);
     delete result.sheetId;

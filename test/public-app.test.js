@@ -69,8 +69,25 @@ function cachedSummary(data = calendarData()) {
   };
 }
 
+function authorizedBootstrap(data = calendarData()) {
+  return {
+    ok: true,
+    authenticated: true,
+    userCacheKey: USER_A,
+    data,
+    authorization: { revalidated: true, validForMs: 58_000 },
+  };
+}
+
+function twoDayCalendarData(revision = 'revision-a') {
+  const data = calendarData();
+  data.detailRevision = revision;
+  data.days.push({ date: '2026-09-29', count: 3, level: 2, symbol: '△' });
+  return data;
+}
+
 function jsonResponse(payload, status = 200) {
-  return new Response(JSON.stringify(payload), {
+  return new Response(status === 204 ? null : JSON.stringify(payload), {
     status,
     headers: {
       'Content-Type': 'application/json',
@@ -390,4 +407,147 @@ test('a different employee cache key is never rendered', async () => {
   await flush();
   assert.equal(dayCell(scenario), undefined);
   assert.equal(scenario.calls.calendar, 1);
+});
+
+test('hover starts one request immediately, click shares it, and cached hover uses the shorter UI delay', async () => {
+  const scenario = makeScenario({
+    bootstrapResponse: authorizedBootstrap(),
+    detailsResponses: [{ deferred: true }],
+  });
+  await flush();
+  let cell = dayCell(scenario);
+  cell.listeners.pointerenter[0]();
+  assert.equal(scenario.calls.details, 1);
+  const firstHoverTimer = scenario.timers.findLast((timer) => timer.milliseconds === 250);
+  assert.ok(firstHoverTimer);
+  const firstHoverRender = firstHoverTimer.callback();
+  const clickPromise = click(cell);
+  assert.equal(scenario.calls.details, 1, 'hover and click must share the pending request');
+  scenario.pending.details[0].resolve(jsonResponse({
+    ok: true,
+    data: { date: '2026-09-28', items: [], revision: 'revision-a' },
+    authorization: { revalidated: true, validForMs: 58_000 },
+  }));
+  await Promise.all([firstHoverRender, clickPromise]);
+  assert.equal(scenario.elements.get('detail-body').children[0].className, 'detail-empty');
+
+  scenario.elements.get('detail-close').listeners.click[0]();
+  cell = dayCell(scenario);
+  cell.listeners.pointerenter[0]();
+  const cachedHoverTimer = scenario.timers.findLast((timer) => timer.milliseconds === 80);
+  assert.ok(cachedHoverTimer, 'memory hit should retain an intentional but shorter hover delay');
+  await cachedHoverTimer.callback();
+  assert.equal(scenario.calls.details, 1, 'memory hit must not create another API request');
+});
+
+test('rapid date movement cannot revive an old hover response or show the wrong date', async () => {
+  const scenario = makeScenario({
+    bootstrapResponse: authorizedBootstrap(twoDayCalendarData()),
+    detailsResponses: [{ deferred: true }, { deferred: true }],
+  });
+  await flush();
+  const cells = scenario.elements.get('calendar-grid').children.filter((element) => element.dataset.date);
+  const first = cells.find((cell) => cell.dataset.date === '2026-09-28');
+  const second = cells.find((cell) => cell.dataset.date === '2026-09-29');
+  first.listeners.pointerenter[0]();
+  const firstTimer = scenario.timers.findLast((timer) => timer.milliseconds === 250);
+  first.listeners.pointerleave[0]();
+  second.listeners.pointerenter[0]();
+  const secondTimer = scenario.timers.findLast((timer) => timer.milliseconds === 250 && timer !== firstTimer);
+  assert.equal(scenario.calls.details, 2);
+
+  const secondRender = secondTimer.callback();
+  scenario.pending.details[1].resolve(jsonResponse({
+    ok: true,
+    data: { date: '2026-09-29', items: [], revision: 'revision-a' },
+    authorization: { revalidated: true, validForMs: 58_000 },
+  }));
+  await secondRender;
+  assert.equal(scenario.elements.get('hover-preview').children[0].textContent, '9月29日（火）');
+
+  const staleRender = firstTimer.callback();
+  scenario.pending.details[0].resolve(jsonResponse({
+    ok: true,
+    data: { date: '2026-09-28', items: [], revision: 'revision-a' },
+    authorization: { revalidated: true, validForMs: 58_000 },
+  }));
+  await staleRender;
+  assert.equal(scenario.elements.get('hover-preview').children[0].textContent, '9月29日（火）');
+});
+
+test('403 on a newer detail request prevents an older success from reviving cache or modal', async () => {
+  const scenario = makeScenario({
+    bootstrapResponse: authorizedBootstrap(twoDayCalendarData()),
+    detailsResponses: [{ deferred: true }, { deferred: true }],
+  });
+  await flush();
+  const cells = scenario.elements.get('calendar-grid').children.filter((element) => element.dataset.date);
+  const firstPromise = click(cells.find((cell) => cell.dataset.date === '2026-09-28'));
+  const secondPromise = click(cells.find((cell) => cell.dataset.date === '2026-09-29'));
+  scenario.pending.details[1].resolve(jsonResponse({ error: { code: 'ACCESS_DENIED' } }, 403));
+  await secondPromise;
+  assert.equal(scenario.elements.get('detail-backdrop').hidden, true);
+  scenario.pending.details[0].resolve(jsonResponse({
+    ok: true,
+    data: { date: '2026-09-28', items: [], revision: 'revision-a' },
+    authorization: { revalidated: true, validForMs: 58_000 },
+  }));
+  await firstPromise;
+  assert.equal(scenario.elements.get('detail-backdrop').hidden, true);
+  assert.equal(dayCell(scenario), undefined);
+});
+
+test('logout prevents an in-flight detail success from reviving employee UI state', async () => {
+  const scenario = makeScenario({
+    bootstrapResponse: authorizedBootstrap(),
+    detailsResponses: [{ deferred: true }],
+  });
+  await flush();
+  const detailPromise = click(dayCell(scenario));
+  await click(scenario.elements.get('logout'));
+  assert.equal(scenario.elements.get('calendar-panel').hidden, true);
+  scenario.pending.details[0].resolve(jsonResponse({
+    ok: true,
+    data: { date: '2026-09-28', items: [], revision: 'revision-a' },
+    authorization: { revalidated: true, validForMs: 58_000 },
+  }));
+  await detailPromise;
+  assert.equal(scenario.elements.get('detail-backdrop').hidden, true);
+  assert.equal(dayCell(scenario), undefined);
+});
+
+test('unchanged refresh retains memory details while a detail revision change invalidates them', async () => {
+  const unchanged = calendarData();
+  const changed = calendarData();
+  changed.detailRevision = 'revision-b';
+  const scenario = makeScenario({
+    bootstrapResponse: authorizedBootstrap(unchanged),
+    calendarResponses: [
+      { ok: true, data: unchanged, authorization: { revalidated: true, validForMs: 58_000 } },
+      { ok: true, data: changed, authorization: { revalidated: true, validForMs: 58_000 } },
+    ],
+    detailsResponses: [
+      {
+        ok: true,
+        data: { date: '2026-09-28', items: [], revision: 'revision-a' },
+        authorization: { revalidated: true, validForMs: 58_000 },
+      },
+      {
+        ok: true,
+        data: { date: '2026-09-28', items: [], revision: 'revision-b' },
+        authorization: { revalidated: true, validForMs: 58_000 },
+      },
+    ],
+  });
+  await flush();
+  await click(dayCell(scenario));
+  assert.equal(scenario.calls.details, 1);
+  scenario.elements.get('detail-close').listeners.click[0]();
+  await scenario.runInterval(0);
+  await click(dayCell(scenario));
+  assert.equal(scenario.calls.details, 1, 'unchanged detail revision should retain memory details');
+  scenario.elements.get('detail-close').listeners.click[0]();
+  await scenario.runInterval(0);
+  await click(dayCell(scenario));
+  assert.equal(scenario.calls.details, 2, 'changed detail revision must invalidate memory details');
 });

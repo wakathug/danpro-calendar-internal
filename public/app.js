@@ -6,6 +6,7 @@
         const AUTHORIZATION_GRACE_MS = 60 * 1000;
         const REFRESH_INDICATOR_DELAY_MS = 300;
         const HOVER_DELAY_MS = 250;
+        const CACHED_HOVER_DELAY_MS = 80;
         const LEGACY_CALENDAR_STORAGE_KEY = 'danpro-employee-calendar:v1';
         const CALENDAR_STORAGE_PREFIX = 'danpro-employee-calendar:v2:';
         const ACTIVE_USER_STORAGE_KEY = 'danpro-employee-calendar-active:v2';
@@ -961,6 +962,7 @@
           if (!hoverCapable.matches || !detailsAuthorized) return;
           window.clearTimeout(hoverTimer);
           const requestToken = ++hoverRequestToken;
+          const cachedAtStart = detailCache.has(dateKey);
           let settled = false;
           const request = loadDayDetails(dateKey).then(
             (result) => {
@@ -988,7 +990,7 @@
                   : '概要を取得できませんでした。',
               );
             }
-          }, HOVER_DELAY_MS);
+          }, cachedAtStart ? CACHED_HOVER_DELAY_MS : HOVER_DELAY_MS);
         }
 
         function cancelHover() {
