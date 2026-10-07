@@ -1,37 +1,47 @@
 import { clearAuthFlowCookie, consumeAuthFlow } from '../_lib/auth-flow.js';
-import { authorizeEmployee, GasAccessDeniedError } from '../_lib/gas-client.js';
+import { authorizeEmployeeForLogin, GasUpstreamError } from '../_lib/gas-client.js';
 import { queryValue, redirect, requestIp, requireMethod, sendJson } from '../_lib/http.js';
 import {
   exchangeAuthorizationCode,
   GOOGLE_ISSUER,
+  OAuthTokenExchangeError,
+  OAuthClaimRejectedError,
   verifyGoogleIdToken,
 } from '../_lib/oauth.js';
 import { checkRateLimit } from '../_lib/rate-limit.js';
 import { createSession } from '../_lib/session.js';
 
 const AUTH_CODE_PATTERN = /^[A-Za-z0-9_\/.~-]{8,4096}$/;
-const SAFE_ERROR_CODE_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+const TOKEN_REJECTION_CODES = new Set(['invalid_grant', 'access_denied', 'invalid_request']);
+const ID_TOKEN_REJECTION_CODES = new Set([
+  'ERR_JWT_EXPIRED', 'ERR_JWT_CLAIM_VALIDATION_FAILED', 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED',
+  'ERR_JWS_INVALID', 'ERR_JWT_INVALID', 'ERR_JOSE_ALG_NOT_ALLOWED',
+]);
+const SAFE_FAILURE_CODES = new Set([
+  'timeout', 'network_error', 'invalid_json', 'invalid_payload', 'upstream_error',
+  'invalid_client', 'unauthorized_client', 'temporarily_unavailable', 'server_error',
+]);
 
 function safeErrorCode(error, stage) {
-  if (typeof error?.safeCode === 'string' && SAFE_ERROR_CODE_PATTERN.test(error.safeCode)) {
-    return error.safeCode.toLowerCase();
+  if (SAFE_FAILURE_CODES.has(error?.safeCode)) return error.safeCode;
+  if (error instanceof GasUpstreamError && /^http_[45][0-9]{2}$/.test(error.safeCode)) {
+    return error.safeCode;
   }
-  if (stage === 'id_token_verification'
-    && typeof error?.code === 'string'
-    && /^ERR_[A-Z0-9_]{1,60}$/.test(error.code)) {
+  if (stage === 'id_token_verification' && ID_TOKEN_REJECTION_CODES.has(error?.code)) {
     return error.code.toLowerCase();
   }
   if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'timeout';
   return 'internal_error';
 }
 
-function logCallbackFailure(stage, code = 'internal_error') {
-  const safeCode = SAFE_ERROR_CODE_PATTERN.test(String(code)) ? String(code).toLowerCase() : 'internal_error';
-  console.error(JSON.stringify({
-    event: 'oauth_callback_failed',
+function logCallbackFailure(stage, code = 'internal_error', rejected = true) {
+  const message = JSON.stringify({
+    event: rejected ? 'oauth_callback_rejected' : 'oauth_callback_failed',
     oauth_callback_stage: `${stage}_failed`,
-    error_code: safeCode,
-  }));
+    error_code: code,
+  });
+  if (rejected) console.warn(message);
+  else console.error(message);
 }
 
 export default async function handler(req, res) {
@@ -61,7 +71,7 @@ export default async function handler(req, res) {
     }
     const providerError = queryValue(req, 'error');
     if (providerError) {
-      logCallbackFailure(stage, SAFE_ERROR_CODE_PATTERN.test(providerError) ? providerError : 'provider_rejected');
+      logCallbackFailure(stage, 'provider_rejected');
       return sendJson(res, 401, { error: 'LOGIN_REJECTED' }, { 'Set-Cookie': clearFlowCookie });
     }
     const code = queryValue(req, 'code');
@@ -76,7 +86,13 @@ export default async function handler(req, res) {
     const identity = await verifyGoogleIdToken(idToken, flow.nonce);
     stage = 'employee_authorization';
     const authorizationStartedAt = Date.now();
-    await authorizeEmployee(identity.email);
+    const authorization = await authorizeEmployeeForLogin(identity.email);
+    if (!authorization.authorized) {
+      logCallbackFailure(stage, authorization.refusalCode);
+      const denied = authorization.refusalCode === 'access_denied';
+      return sendJson(res, denied ? 403 : 401, { error: denied ? 'ACCESS_DENIED' : 'LOGIN_FAILED' },
+        { 'Set-Cookie': clearFlowCookie });
+    }
     stage = 'session_creation';
     const newSession = await createSession(identity.email, Date.now(), {
       lastAuthorizedAt: authorizationStartedAt,
@@ -84,11 +100,17 @@ export default async function handler(req, res) {
     stage = 'cookie_issue';
     redirect(res, '/', [clearFlowCookie, newSession.cookie]);
   } catch (error) {
-    if (error instanceof GasAccessDeniedError) {
-      logCallbackFailure(stage, 'access_denied');
-      return sendJson(res, 403, { error: 'ACCESS_DENIED' }, { 'Set-Cookie': clearFlowCookie });
+    if ((stage === 'token_exchange' && error instanceof OAuthTokenExchangeError
+      && TOKEN_REJECTION_CODES.has(error.safeCode))
+      || (stage === 'id_token_verification'
+        && (error instanceof OAuthClaimRejectedError || ID_TOKEN_REJECTION_CODES.has(error?.code)))) {
+      const rejectionCode = error instanceof OAuthTokenExchangeError ? error.safeCode
+        : error instanceof OAuthClaimRejectedError ? 'invalid_id_token_claims' : error.code.toLowerCase();
+      logCallbackFailure(stage, rejectionCode);
+      return sendJson(res, 401, { error: 'LOGIN_FAILED' }, { 'Set-Cookie': clearFlowCookie });
     }
-    logCallbackFailure(stage, safeErrorCode(error, stage));
-    sendJson(res, 401, { error: 'LOGIN_FAILED' }, { 'Set-Cookie': clearFlowCookie });
+    logCallbackFailure(stage, safeErrorCode(error, stage), false);
+    const status = error instanceof GasUpstreamError || stage === 'token_exchange' ? 502 : 500;
+    return sendJson(res, status, { error: 'LOGIN_FAILED' }, { 'Set-Cookie': clearFlowCookie });
   }
 }

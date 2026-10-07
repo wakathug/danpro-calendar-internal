@@ -97,9 +97,15 @@ export async function callGas(action, email, body = {}, options = {}) {
     options.onTiming({ gasTotal: elapsedMs(startedAt) });
   }
   if (response.status === 403 || payload?.error === 'ACCESS_DENIED') {
+    if (action === 'authorize' && options.authorizationRefusalsAsResult === true) {
+      return { authorized: false, refusalCode: 'access_denied' };
+    }
     throw new GasAccessDeniedError();
   }
   if (!response.ok || payload?.ok !== true) {
+    if (response.ok && action === 'authorize' && options.authorizationRefusalsAsResult === true) {
+      return { authorized: false, refusalCode: 'invalid_payload' };
+    }
     throw new GasUpstreamError(!response.ok ? `http_${response.status}` : 'invalid_payload');
   }
   const internalTiming = payload.data?.internalTiming;
@@ -145,6 +151,16 @@ export async function authorizeEmployee(email, options = {}) {
   const data = await callGas('authorize', email, {}, options);
   if (data?.authorized !== true) throw new GasAccessDeniedError();
   return true;
+}
+
+// Login converts expected authorization refusals into values; other callers keep their error contract.
+export async function authorizeEmployeeForLogin(email) {
+  const data = await callGas('authorize', email, {}, { authorizationRefusalsAsResult: true });
+  if (data?.authorized !== true) {
+    return { authorized: false, refusalCode: data?.refusalCode === 'invalid_payload'
+      ? 'invalid_payload' : 'access_denied' };
+  }
+  return { authorized: true };
 }
 
 export function isFreshGasTimestamp(timestamp, now = Date.now()) {

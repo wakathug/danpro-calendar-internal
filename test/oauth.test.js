@@ -79,8 +79,8 @@ test('callback logs only a safe stage and provider code when token exchange fail
     headers: { 'Content-Type': 'application/json' },
   });
   const messages = [];
-  const originalConsoleError = console.error;
-  console.error = (message) => messages.push(String(message));
+  const originalConsoleError = console.warn;
+  console.warn = (message) => messages.push(String(message));
   try {
     const response = mockResponse();
     await callbackHandler(mockRequest({
@@ -90,7 +90,7 @@ test('callback logs only a safe stage and provider code when token exchange fail
     assert.equal(response.statusCode, 401);
     assert.equal(response.json().error, 'LOGIN_FAILED');
   } finally {
-    console.error = originalConsoleError;
+    console.warn = originalConsoleError;
   }
   assert.equal(messages.length, 1);
   assert.match(messages[0], /"oauth_callback_stage":"token_exchange_failed"/);
@@ -140,4 +140,78 @@ test('Google ID token with an invalid signature is rejected', async () => {
     .sign(signer.privateKey);
   const wrongKeySet = createLocalJWKSet({ keys: [verifierJwk] });
   await assert.rejects(() => verifyGoogleIdToken(token, 'nonce-value', { keySet: wrongKeySet }));
+});
+
+test('callback keeps expected refusals out of error logs and preserves infrastructure failures', async () => {
+  const signer = await generateKeyPair('RS256');
+  const jwk = await exportJWK(signer.publicKey);
+  jwk.kid = 'callback-test';
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  const warnings = [];
+  const errors = [];
+  console.warn = message => warnings.push(JSON.parse(message));
+  console.error = message => errors.push(JSON.parse(message));
+  try {
+    for (const scenario of [
+      { name: 'invalid-state', status: 400, warning: true },
+      { name: 'invalid-issuer', status: 400, warning: true },
+      { name: 'provider-rejected', status: 401, warning: true },
+      { name: 'invalid-code', status: 400, warning: true },
+      { name: 'access-denied', status: 403, warning: true },
+      { name: 'invalid-payload', status: 401, warning: true },
+      { name: 'invalid-claims', status: 401, warning: true },
+      { name: 'gas-500', status: 502, warning: false },
+      { name: 'gas-network', status: 502, warning: false },
+      { name: 'gas-json', status: 502, warning: false },
+      { name: 'provider-500', status: 502, warning: false },
+      { name: 'store-failure', status: 500, warning: false },
+    ]) {
+      globalThis.__DANPRO_TEST_STORE__ = new MemoryStore();
+      warnings.length = 0;
+      errors.length = 0;
+      const flow = await createAuthFlow();
+      const binding = /__Host-danpro_oauth=([^;]+)/.exec(flow.cookie)[1];
+      const token = await new SignJWT({ nonce: scenario.name === 'invalid-claims' ? 'wrong-nonce' : flow.nonce,
+        email: 'secret-employee@example.com', email_verified: true })
+        .setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).setIssuer(GOOGLE_ISSUER)
+        .setAudience(process.env.GOOGLE_OAUTH_CLIENT_ID).setSubject('secret-subject')
+        .setIssuedAt().setExpirationTime('5m').sign(signer.privateKey);
+      globalThis.fetch = async url => {
+        if (String(url).includes('/certs')) return new Response(JSON.stringify({ keys: [jwk] }));
+        if (String(url).includes('oauth2.googleapis.com/token')) {
+          if (scenario.name === 'provider-500') return new Response(JSON.stringify({ error: 'server_error' }), { status: 500 });
+          return new Response(JSON.stringify({ id_token: token }));
+        }
+        if (scenario.name === 'gas-network') throw new Error('secret-network-message');
+        if (scenario.name === 'gas-json') return new Response('secret-invalid-json');
+        if (scenario.name === 'gas-500') return new Response(JSON.stringify({ error: 'secret-gas-message' }), { status: 500 });
+        if (scenario.name === 'access-denied') return new Response(JSON.stringify({ ok: false, error: 'ACCESS_DENIED' }), { status: 403 });
+        if (scenario.name === 'invalid-payload') return new Response(JSON.stringify({ ok: false, error: 'secret-provider-message' }));
+        throw new Error('Unexpected fetch');
+      };
+      if (scenario.name === 'store-failure') globalThis.__DANPRO_TEST_STORE__.incr = async () => { throw new Error('secret-store-message'); };
+      const query = { state: flow.state, code: 'valid-authorization-code' };
+      if (scenario.name === 'invalid-state') query.state = 'secret-invalid-state';
+      if (scenario.name === 'invalid-issuer') query.iss = 'https://secret-issuer.example';
+      if (scenario.name === 'provider-rejected') query.error = 'secret-provider-code';
+      if (scenario.name === 'invalid-code') query.code = 'bad';
+      const response = mockResponse();
+      await callbackHandler(mockRequest({ headers: { cookie: `${OAUTH_COOKIE}=${binding}` }, query }), response);
+      assert.equal(response.statusCode, scenario.status, scenario.name);
+      assert.equal(warnings.length, scenario.warning ? 1 : 0, scenario.name);
+      assert.equal(errors.length, scenario.warning ? 0 : 1, scenario.name);
+      assert.match(response.getHeader('set-cookie'), /Max-Age=0/);
+      assert.equal(response.getHeader('cache-control'), 'private, no-store, max-age=0');
+      assert.doesNotMatch(response.getHeader('set-cookie'), /__Host-danpro_session=[^;]/);
+      const log = JSON.stringify([...warnings, ...errors]);
+      for (const secret of [token, flow.state, flow.nonce, binding, 'secret-', 'valid-authorization-code', process.env.GOOGLE_OAUTH_CLIENT_SECRET, process.env.INTERNAL_GAS_SIGNING_SECRET]) {
+        assert.ok(!log.includes(secret), `${scenario.name}: sensitive value leaked`);
+      }
+      assert.deepEqual(Object.keys([...warnings, ...errors][0]).sort(), ['error_code', 'event', 'oauth_callback_stage']);
+    }
+  } finally {
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
 });

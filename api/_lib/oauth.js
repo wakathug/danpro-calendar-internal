@@ -17,6 +17,13 @@ export class OAuthTokenExchangeError extends Error {
   }
 }
 
+export class OAuthClaimRejectedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'OAuthClaimRejectedError';
+  }
+}
+
 function getGoogleJwks() {
   if (!googleJwks) googleJwks = createRemoteJWKSet(GOOGLE_JWKS_URI);
   return googleJwks;
@@ -64,18 +71,18 @@ export async function exchangeAuthorizationCode(code, codeVerifier) {
 }
 
 export function validateGoogleClaims(payload, expectedNonce, expectedAudience, now = Date.now()) {
-  if (payload?.iss !== GOOGLE_ISSUER) throw new Error('Invalid token issuer');
+  if (payload?.iss !== GOOGLE_ISSUER) throw new OAuthClaimRejectedError('Invalid token issuer');
   const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-  if (!audiences.includes(expectedAudience)) throw new Error('Invalid token audience');
-  if (!Number.isFinite(payload.exp) || payload.exp * 1000 <= now) throw new Error('Expired token');
-  if (!Number.isFinite(payload.iat) || payload.iat * 1000 > now + 60_000) throw new Error('Invalid token time');
+  if (!audiences.includes(expectedAudience)) throw new OAuthClaimRejectedError('Invalid token audience');
+  if (!Number.isFinite(payload.exp) || payload.exp * 1000 <= now) throw new OAuthClaimRejectedError('Expired token');
+  if (!Number.isFinite(payload.iat) || payload.iat * 1000 > now + 60_000) throw new OAuthClaimRejectedError('Invalid token time');
   if (typeof payload.nonce !== 'string' || !safeEqual(payload.nonce, expectedNonce)) {
-    throw new Error('Invalid token nonce');
+    throw new OAuthClaimRejectedError('Invalid token nonce');
   }
-  if (payload.email_verified !== true) throw new Error('Unverified email');
+  if (payload.email_verified !== true) throw new OAuthClaimRejectedError('Unverified email');
   const email = normalizeEmail(payload.email);
-  if (!email) throw new Error('Missing verified email');
-  if (typeof payload.sub !== 'string' || !payload.sub) throw new Error('Missing subject');
+  if (!email) throw new OAuthClaimRejectedError('Missing verified email');
+  if (typeof payload.sub !== 'string' || !payload.sub) throw new OAuthClaimRejectedError('Missing subject');
   return { email, subject: payload.sub };
 }
 

@@ -113,8 +113,9 @@ test('Vercel production logging is limited to safe OAuth stage codes and timings
     .join('\n');
   assert.doesNotMatch(otherApi, /console\.(log|info|warn|error)/);
   assert.equal((callback.match(/console\.error/g) || []).length, 1);
-  assert.doesNotMatch(callback, /console\.(log|info|warn)/);
-  assert.match(callback, /console\.error\(JSON\.stringify\(\{[\s\S]*?event: 'oauth_callback_failed',[\s\S]*?oauth_callback_stage:[\s\S]*?error_code: safeCode,[\s\S]*?\}\)\)/);
+  assert.equal((callback.match(/console\.warn/g) || []).length, 1);
+  assert.doesNotMatch(callback, /console\.(log|info)/);
+  assert.match(callback, /event: rejected \? 'oauth_callback_rejected' : 'oauth_callback_failed'/);
   assert.doesNotMatch(callback, /JSON\.stringify\([^)]*(session|email|customer|content|token|codeVerifier)/i);
   assert.equal((login.match(/console\.error/g) || []).length, 1);
   assert.doesNotMatch(login, /console\.(log|info|warn)/);
