@@ -7,17 +7,29 @@
     <style>
       :root {
         color-scheme: light;
-        --ink: #17211b;
-        --muted: #617067;
-        --line: #dce5df;
+        --page-bg: #fff8f0;
+        --brand-main: #009056;
+        --control-border: #8ba996;
+        --saturday: #00714a;
+        --sunday: #94523e;
+        --danger-border: #d9a99b;
+        --focus: #00714a;
+        --weekend-border: rgb(0 113 74 / 18%);
+        --panel-shadow: rgb(88 68 57 / 9%);
+        --preview-shadow: rgb(88 68 57 / 20%);
+        --backdrop: rgb(88 68 57 / 55%);
+        --modal-shadow: rgb(88 68 57 / 35%);
+        --ink: #382a23;
+        --muted: #716052;
+        --line: #d9cebf;
         --surface: #ffffff;
-        --surface-soft: #f5f8f6;
-        --accent: #17643c;
-        --accent-dark: #0d4a2a;
-        --level-0: #f2f7f3;
-        --level-1: #d9eddc;
-        --level-2: #a9d5ad;
-        --level-3: #287444;
+        --surface-soft: #fffaee;
+        --accent: #00714a;
+        --accent-dark: #005c3c;
+        --level-0: #fffaee;
+        --level-1: #d9eee0;
+        --level-2: #6cb580;
+        --level-3: #00714a;
         --danger: #9f2f2f;
         --danger-bg: #fff0f0;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
@@ -27,7 +39,7 @@
 
       body {
         margin: 0;
-        background: #eef3ef;
+        background: var(--page-bg);
         color: var(--ink);
       }
 
@@ -52,12 +64,12 @@
         border: 1px solid var(--line);
         border-radius: 18px;
         background: var(--surface);
-        box-shadow: 0 12px 32px rgb(36 69 48 / 9%);
+        box-shadow: 0 12px 32px var(--panel-shadow);
       }
 
       .app-header {
         padding: 20px 18px 16px;
-        background: linear-gradient(135deg, #f8fbf8 0%, #e6f2e9 100%);
+        background: var(--surface-soft);
       }
 
       .title-row {
@@ -76,7 +88,7 @@
 
       .employee-badge {
         padding: 3px 8px;
-        border: 1px solid rgb(23 100 60 / 24%);
+        border: 1px solid var(--control-border);
         border-radius: 999px;
         background: rgb(255 255 255 / 72%);
         color: var(--accent-dark);
@@ -110,7 +122,7 @@
       .today-button:focus-visible,
       .day.interactive:focus-visible,
       .modal-close:focus-visible {
-        outline: 3px solid rgb(23 100 60 / 28%);
+        outline: 3px solid var(--focus);
         outline-offset: 2px;
       }
 
@@ -132,7 +144,7 @@
       .nav-button,
       .today-button {
         min-height: 42px;
-        border: 1px solid #b9c9be;
+        border: 1px solid var(--control-border);
         border-radius: 10px;
         background: #fff;
         color: var(--accent-dark);
@@ -146,7 +158,7 @@
       }
 
       .nav-button:hover,
-      .today-button:hover { background: #eef7f0; }
+      .today-button:hover { background: var(--surface-soft); }
 
       .secondary-toolbar {
         display: flex;
@@ -171,7 +183,7 @@
 
       .spinner,
       .detail-spinner {
-        border: 2px solid #bfd0c3;
+        border: 2px solid var(--control-border);
         border-top-color: var(--accent);
         border-radius: 50%;
         animation: spin .8s linear infinite;
@@ -192,7 +204,7 @@
       .error {
         margin: 0 12px 12px;
         padding: 10px 12px;
-        border: 1px solid #efc1c1;
+        border: 1px solid var(--danger-border);
         border-radius: 10px;
         background: var(--danger-bg);
         color: var(--danger);
@@ -223,8 +235,8 @@
         text-align: center;
       }
 
-      .weekday.saturday { color: #30689b; }
-      .weekday.sunday { color: #a34646; }
+      .weekday.saturday { color: var(--saturday); }
+      .weekday.sunday { color: var(--sunday); }
 
       .calendar-grid {
         overflow: hidden;
@@ -248,7 +260,7 @@
       .day.interactive { cursor: pointer; }
 
       .day.interactive:hover {
-        box-shadow: inset 0 0 0 2px rgb(13 74 42 / 30%);
+        box-shadow: inset 0 0 0 2px var(--focus);
       }
 
       .day.level-0 { --day-bg: var(--level-0); }
@@ -257,8 +269,8 @@
       .day.level-3 { --day-bg: var(--level-3); color: #fff; }
 
       .day.outside:not(.interactive) {
-        --day-bg: #fafbfa;
-        color: #9aa49d;
+        --day-bg: var(--surface-soft);
+        color: var(--muted);
       }
 
       .day.outside.interactive { opacity: .72; }
@@ -266,14 +278,14 @@
       .day.weekend:not(.level-3)::after {
         position: absolute;
         inset: 0;
-        border-top: 3px solid rgb(74 108 133 / 18%);
+        border-top: 3px solid var(--weekend-border);
         content: "";
         pointer-events: none;
       }
 
       .day.today {
         z-index: 1;
-        outline: 3px solid #e09b22;
+        outline: 3px solid var(--brand-main);
         outline-offset: -3px;
       }
 
@@ -297,7 +309,7 @@
       }
 
       .no-data {
-        color: #98a39b;
+        color: var(--muted);
         font-weight: 500;
       }
 
@@ -333,7 +345,7 @@
         width: 26px;
         height: 26px;
         place-items: center;
-        border: 1px solid rgb(23 33 27 / 12%);
+        border: 1px solid var(--line);
         border-radius: 5px;
         background: var(--legend-color);
         color: var(--legend-ink, var(--ink));
@@ -347,10 +359,10 @@
         z-index: 20;
         width: min(320px, calc(100vw - 24px));
         padding: 10px 12px;
-        border: 1px solid #bfd0c3;
+        border: 1px solid var(--control-border);
         border-radius: 10px;
         background: rgb(255 255 255 / 98%);
-        box-shadow: 0 10px 28px rgb(23 33 27 / 20%);
+        box-shadow: 0 10px 28px var(--preview-shadow);
         color: var(--ink);
         font-size: .76rem;
         line-height: 1.45;
@@ -379,7 +391,7 @@
         display: grid;
         place-items: end center;
         padding: 12px;
-        background: rgb(12 25 17 / 55%);
+        background: var(--backdrop);
       }
 
       .modal {
@@ -390,7 +402,7 @@
         overflow: hidden;
         border-radius: 18px 18px 12px 12px;
         background: #fff;
-        box-shadow: 0 24px 64px rgb(8 22 13 / 35%);
+        box-shadow: 0 24px 64px var(--modal-shadow);
       }
 
       .modal-header {
@@ -589,7 +601,7 @@
           { level: 2, symbol: '△', label: 'やや混雑' },
           { level: 3, symbol: '×', label: '混雑' },
         ];
-        const LEVEL_COLORS = ['#f2f7f3', '#d9eddc', '#a9d5ad', '#287444'];
+        const LEVEL_COLORS = ['var(--level-0)', 'var(--level-1)', 'var(--level-2)', 'var(--level-3)'];
         const LEVEL_SYMBOLS = ['◎', '○', '△', '×'];
         const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
         const hoverCapable = window.matchMedia('(hover: hover) and (pointer: fine)');

@@ -22,7 +22,7 @@
           { level: 2, symbol: '△', label: 'やや混雑' },
           { level: 3, symbol: '×', label: '混雑' },
         ];
-        const LEVEL_COLORS = ['#f2f7f3', '#d9eddc', '#a9d5ad', '#287444'];
+        const LEVEL_COLORS = ['var(--level-0)', 'var(--level-1)', 'var(--level-2)', 'var(--level-3)'];
         const LEVEL_SYMBOLS = ['◎', '○', '△', '×'];
         const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
         const hoverCapable = window.matchMedia('(hover: hover) and (pointer: fine)');
