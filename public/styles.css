@@ -60,8 +60,29 @@
         box-shadow: 0 12px 32px var(--panel-shadow);
       }
 
+      .app:has(> .login-panel:not([hidden])) {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100svh;
+        padding: 24px 12px;
+      }
+
       .login-panel {
-        margin-top: min(18vh, 140px);
+        width: 100%;
+        margin: 0;
+      }
+
+      .login-content { width: 100%; }
+
+      .login-content .brand-logo {
+        width: 160px;
+        height: auto;
+        margin: 0 auto 24px;
+      }
+
+      @media (min-width: 640px) {
+        .login-content .brand-logo { width: 200px; }
       }
 
       .login-content {
